@@ -1,0 +1,152 @@
+================================================================
+  FRONTEND DEVELOPER GUIDE — reCAPTCHA v2 Integration
+  Universal Billing System
+================================================================
+
+STEP 1 — Install the reCAPTCHA library
+---------------------------------------
+Run this command in your Angular project root:
+
+    npm install ng-recaptcha
+
+
+STEP 2 — Add the Site Key to environment files
+-----------------------------------------------
+File: src/environments/environment.ts
+
+    export const environment = {
+      production: false,
+      apiUrl: 'http://localhost:8080/api',
+      recaptchaSiteKey: 'YOUR_SITE_KEY_HERE'
+    };
+
+File: src/environments/environment.prod.ts
+
+    export const environment = {
+      production: true,
+      apiUrl: 'https://your-production-api.com/api',
+      recaptchaSiteKey: 'YOUR_SITE_KEY_HERE'
+    };
+
+NOTE: Get your Site Key from https://www.google.com/recaptcha/admin/create
+      Choose: reCAPTCHA v2 -> "I'm not a robot" Checkbox
+      Add domain: localhost (for dev), your real domain (for prod)
+
+
+STEP 3 — Import the module
+---------------------------
+File: src/app/app.module.ts
+
+    import { RecaptchaModule, RecaptchaFormsModule } from 'ng-recaptcha';
+
+    @NgModule({
+      imports: [
+        RecaptchaModule,
+        RecaptchaFormsModule,
+        // ...rest of your imports
+      ]
+    })
+    export class AppModule {}
+
+
+STEP 4 — Add the widget to the login form template
+----------------------------------------------------
+File: login.component.html
+
+    <form [formGroup]="loginForm" (ngSubmit)="onSubmit()">
+
+      <input formControlName="username" placeholder="Email or username" />
+      <input formControlName="password" type="password" placeholder="Password" />
+
+      <!-- reCAPTCHA widget -->
+      <re-captcha
+        formControlName="captchaToken"
+        [siteKey]="siteKey">
+      </re-captcha>
+
+      <button type="submit" [disabled]="loginForm.invalid">Login</button>
+
+    </form>
+
+
+STEP 5 — Wire it up in the component
+--------------------------------------
+File: login.component.ts
+
+    import { Component } from '@angular/core';
+    import { FormBuilder, FormGroup, Validators } from '@angular/forms';
+    import { environment } from 'src/environments/environment';
+
+    @Component({ ... })
+    export class LoginComponent {
+
+      siteKey = environment.recaptchaSiteKey;
+
+      loginForm: FormGroup = this.fb.group({
+        username:     ['', Validators.required],
+        password:     ['', Validators.required],
+        captchaToken: [null, Validators.required]
+      });
+
+      constructor(private fb: FormBuilder, private authService: AuthService) {}
+
+      onSubmit() {
+        if (this.loginForm.invalid) return;
+
+        const { username, password, captchaToken } = this.loginForm.value;
+
+        this.authService.login({ username, password, captchaToken }).subscribe({
+          next: (res) => { /* save token, redirect */ },
+          error: (err) => { /* show error message */ }
+        });
+      }
+    }
+
+
+STEP 6 — Update the AuthService login method
+---------------------------------------------
+File: auth.service.ts
+
+    login(payload: { username: string; password: string; captchaToken: string }) {
+      return this.http.post<AuthResponse>(
+        `${environment.apiUrl}/auth/login`,
+        payload
+      );
+    }
+
+
+WHAT THE REQUEST BODY MUST LOOK LIKE
+--------------------------------------
+POST http://localhost:8080/api/auth/login
+Content-Type: application/json
+
+    {
+      "username": "admin@ubs.io",
+      "password": "yourpassword",
+      "captchaToken": "03AGdBq25....<token from Google>"
+    }
+
+IMPORTANT: The field name must be exactly "captchaToken" — the backend
+           validates this exact field name.
+
+
+CHECKLIST
+----------
+[ ] npm install ng-recaptcha
+[ ] Site Key added to environment.ts and environment.prod.ts
+[ ] RecaptchaModule and RecaptchaFormsModule imported in AppModule
+[ ] <re-captcha> widget added to the login form template
+[ ] captchaToken added to the FormGroup with Validators.required
+[ ] captchaToken sent in the login POST request body
+
+
+DEV NOTE
+---------
+The backend currently has recaptcha.enabled=false in application.properties.
+This means CAPTCHA is SKIPPED during local development — you can test login
+without a real token.
+
+Once you have the real Site Key and Secret Key from Google, the backend dev
+will set recaptcha.enabled=true and add the Secret Key to the server config.
+
+================================================================

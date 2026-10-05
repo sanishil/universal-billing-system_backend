@@ -111,8 +111,12 @@ public class SecurityConfig {
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration config = new CorsConfiguration();
 
-        // Allow requests from the Angular frontend
-        config.setAllowedOrigins(List.of(allowedOrigins));
+        // Allow requests from any origin (wildcard) or specific origins
+        if ("*".equals(allowedOrigins)) {
+            config.addAllowedOriginPattern("*");
+        } else {
+            config.setAllowedOrigins(List.of(allowedOrigins.split(",")));
+        }
 
         // Allow all standard HTTP methods
         config.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
@@ -120,8 +124,8 @@ public class SecurityConfig {
         // Allow Authorization header (for sending JWT) + Content-Type
         config.setAllowedHeaders(List.of("*"));
 
-        // Allow credentials (cookies, auth headers)
-        config.setAllowCredentials(true);
+        // Credentials only work with explicit origins, not wildcard
+        config.setAllowCredentials(!"*".equals(allowedOrigins));
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/api/**", config);  // Apply to all /api/ routes

@@ -3,6 +3,7 @@ package com.billing.controller;
 import com.billing.backend.dto.*;
 import com.billing.backend.entity.User;
 import com.billing.backend.service.AuthService;
+import com.billing.backend.service.CaptchaService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -33,6 +34,7 @@ import java.util.Optional;
 public class AuthController {
 
     private final AuthService authService;
+    private final CaptchaService captchaService;
 
     // ── POST /api/auth/login ──────────────────────────────────────────────────
     /**
@@ -45,13 +47,17 @@ public class AuthController {
      */
     @PostMapping("/login")
     public ResponseEntity<AuthResponse> login(@Valid @RequestBody LoginRequest request) {
-        // Step 1: Authenticate (throws BadRequestException if wrong credentials)
+        // Step 1: Verify reCAPTCHA token BEFORE touching credentials
+        // Throws BadRequestException (400) if token is missing or invalid.
+        captchaService.verify(request.getCaptchaToken());
+
+        // Step 2: Authenticate (throws BadRequestException if wrong credentials)
         User user = authService.login(request.getUsername(), request.getPassword());
 
-        // Step 2: Generate JWT token
+        // Step 3: Generate JWT token
         String token = authService.generateToken(user);
 
-        // Step 3: Build response (never include passwordHash!)
+        // Step 4: Build response (never include passwordHash!)
         AuthResponse response = AuthResponse.builder()
                 .token(token)
                 .user(AuthResponse.UserDto.builder()
