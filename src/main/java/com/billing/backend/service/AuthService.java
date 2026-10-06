@@ -18,7 +18,7 @@ import java.util.HexFormat;
 import java.util.Optional;
 
 /**
- * AuthService — handles all authentication logic.
+// * AuthService — handles all authentication logic.
  *
  * SERVICE LAYER ROLE IN MVC:
  * ──────────────────────────
@@ -62,19 +62,27 @@ public class AuthService {
             userOpt = userRepository.findByUsername(usernameOrEmail);
         }
 
-        // Step 2: If not found → generic error (don't reveal which field is wrong)
+        // Step 2: If not found → tell the user this account does not exist
         if (userOpt.isEmpty()) {
-            throw new BadRequestException("Invalid credentials");
+            if (usernameOrEmail.contains("@")) {
+                throw new BadRequestException(
+                    "No account found with email \"" + usernameOrEmail + "\". Please check your email or register.");
+            } else {
+                throw new BadRequestException(
+                    "No account found with username \"" + usernameOrEmail + "\". Please check your username or register.");
+            }
         }
 
         User user = userOpt.get();
 
         // Step 3: Check account status
         if (user.getStatus() == User.UserStatus.LOCKED) {
-            throw new BadRequestException("Account is locked. Please contact support.");
+            throw new BadRequestException(
+                "Your account has been locked after too many failed attempts. Please contact support.");
         }
         if (user.getStatus() == User.UserStatus.INACTIVE) {
-            throw new BadRequestException("Account is not activated. Check your email.");
+            throw new BadRequestException(
+                "Your account is not activated yet. Please check your email for the activation link.");
         }
 
         // Step 4: Verify password using BCrypt
@@ -87,9 +95,15 @@ public class AuthService {
             // Lock account after 5 failed attempts (Rule 13)
             if (attempts >= 5) {
                 user.setStatus(User.UserStatus.LOCKED);
+                userRepository.save(user);
+                throw new BadRequestException(
+                    "Your account has been locked after 5 failed attempts. Please contact support.");
             }
+
+            int remaining = 5 - attempts;
             userRepository.save(user);
-            throw new BadRequestException("Invalid credentials");
+            throw new BadRequestException(
+                "Incorrect password. " + remaining + " attempt" + (remaining == 1 ? "" : "s") + " remaining before your account is locked.");
         }
 
         // Step 5: Login success — reset failure counter
@@ -111,14 +125,15 @@ public class AuthService {
      * @return Newly created User entity
      */
     public User register(String name, String email, String company, String password) {
-        // Check for duplicate email (Rule: 409 if already registered)
+        // Check for duplicate email
         if (userRepository.existsByEmail(email)) {
-            throw new ConflictException("Email address is already registered");
+            throw new ConflictException(
+                "An account with email \"" + email + "\" already exists. Please login or use a different email.");
         }
 
         // Validate password length (min 8 chars)
         if (password == null || password.length() < 8) {
-            throw new BadRequestException("Password must be at least 8 characters");
+            throw new BadRequestException("Password must be at least 8 characters long.");
         }
 
         // Generate user ID: USR-01, USR-02 ... USR-99, USR-100
