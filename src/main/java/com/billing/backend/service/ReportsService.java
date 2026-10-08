@@ -12,14 +12,6 @@ import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.util.*;
 
-/**
- * ReportsService — generates analytics and dashboard data.
- *
- * Endpoints served:
- *   GET /api/reports/stats       → bill counts + revenue totals
- *   GET /api/reports/dashboard   → YTD data + monthly breakdown
- *   GET /api/reports/analytics   → payment methods + bill status breakdown
- */
 @Service
 @RequiredArgsConstructor
 public class ReportsService {
@@ -28,26 +20,11 @@ public class ReportsService {
     private final CustomerRepository customerRepository;
     private final PaymentRepository paymentRepository;
 
-    // Month names for the monthly report
     private static final String[] MONTH_NAMES = {
         "", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
     };
 
-    // ── BILL STATS ────────────────────────────────────────────────────────────
-
-    /**
-     * Returns simple bill status counts and total revenue.
-     *
-     * Response shape:
-     * {
-     *   "totalRevenue": 1124900,
-     *   "paidCount": 3,
-     *   "pendingCount": 2,
-     *   "overdueCount": 1,
-     *   "totalCount": 6
-     * }
-     */
     public Map<String, Object> getBillStats() {
         BigDecimal totalRevenue = billRepository.getTotalRevenue();
         long paidCount    = billRepository.countByStatus(Bill.BillStatus.PAID);
@@ -64,32 +41,13 @@ public class ReportsService {
         return stats;
     }
 
-    // ── DASHBOARD DATA ────────────────────────────────────────────────────────
-
-    /**
-     * Returns YTD revenue, bill count, collection rate, and monthly breakdown.
-     *
-     * Response shape:
-     * {
-     *   "totalRevenueYTD": 12450000,
-     *   "totalBillsGenerated": 1245,
-     *   "collectionRate": 96.4,
-     *   "monthlyData": [
-     *     { "month": "Jan", "amount": 1240000 },
-     *     ...
-     *   ]
-     * }
-     */
     public Map<String, Object> getDashboardData() {
         int currentYear = LocalDate.now().getYear();
 
-        // Year-to-date revenue (all PAID bills in current year)
         BigDecimal ytdRevenue = billRepository.getTotalRevenueByYear(currentYear);
 
-        // Total bills generated (all time)
         long totalBills = billRepository.count();
 
-        // Collection rate = paidCount / totalCount × 100
         long paidCount  = billRepository.countByStatus(Bill.BillStatus.PAID);
         double collectionRate = totalBills > 0
                 ? BigDecimal.valueOf((double) paidCount / totalBills * 100)
@@ -97,7 +55,6 @@ public class ReportsService {
                       .doubleValue()
                 : 0.0;
 
-        // Monthly revenue breakdown for current year
         List<Object[]> monthlyRaw = billRepository.getMonthlyRevenue(currentYear);
         Map<Integer, BigDecimal> monthlyMap = new HashMap<>();
         for (Object[] row : monthlyRaw) {
@@ -106,7 +63,6 @@ public class ReportsService {
             monthlyMap.put(month, amount);
         }
 
-        // Build the monthly data array for months 1–12
         List<Map<String, Object>> monthlyData = new ArrayList<>();
         for (int m = 1; m <= 12; m++) {
             Map<String, Object> entry = new LinkedHashMap<>();
@@ -123,23 +79,10 @@ public class ReportsService {
         return dashboard;
     }
 
-    // ── ANALYTICS DATA ────────────────────────────────────────────────────────
-
-    /**
-     * Returns payment method breakdown and bill status breakdown.
-     *
-     * Response shape:
-     * {
-     *   "paymentMethods": [...],
-     *   "billStatusBreakdown": [...]
-     * }
-     */
     public Map<String, Object> getAnalyticsData() {
-        // ── Payment Method Breakdown ──────────────────────────────────────────
         List<Object[]> methodRaw = billRepository.getPaymentMethodBreakdown();
         List<Map<String, Object>> paymentMethods = new ArrayList<>();
 
-        // Calculate total volume across all methods for percentage
         BigDecimal totalVolume = methodRaw.stream()
                 .map(row -> new BigDecimal(row[2].toString()))
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
@@ -149,7 +92,6 @@ public class ReportsService {
             long count = ((Number) row[1]).longValue();
             BigDecimal volume = new BigDecimal(row[2].toString());
 
-            // Calculate percentage of total volume
             double percent = totalVolume.compareTo(BigDecimal.ZERO) > 0
                     ? volume.divide(totalVolume, 4, RoundingMode.HALF_UP)
                            .multiply(BigDecimal.valueOf(100))
@@ -163,7 +105,6 @@ public class ReportsService {
             paymentMethods.add(entry);
         }
 
-        // ── Bill Status Breakdown ─────────────────────────────────────────────
         long paidCount    = billRepository.countByStatus(Bill.BillStatus.PAID);
         long pendingCount = billRepository.countByStatus(Bill.BillStatus.PENDING);
         long overdueCount = billRepository.countByStatus(Bill.BillStatus.OVERDUE);
@@ -179,8 +120,6 @@ public class ReportsService {
         analytics.put("billStatusBreakdown", billStatusBreakdown);
         return analytics;
     }
-
-    // ── HELPERS ───────────────────────────────────────────────────────────────
 
     private Map<String, Object> buildStatusEntry(String name, long count, long total) {
         double percent = total > 0 ? (double) count / total * 100 : 0;

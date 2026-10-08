@@ -5,9 +5,6 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import lombok.Data;
 
-/**
- * RegisterRequest — request body for POST /api/auth/register
- */
 @Data
 public class RegisterRequest {
 
@@ -19,7 +16,6 @@ public class RegisterRequest {
     @Email(message = "Invalid email format")
     private String email;
 
-    // Optional — company name
     private String company;
 
     @NotBlank(message = "Password is required")

@@ -4,7 +4,6 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import lombok.Data;
 
-/** Request body for POST /api/auth/reset-password */
 @Data
 public class ResetPasswordRequest {
 

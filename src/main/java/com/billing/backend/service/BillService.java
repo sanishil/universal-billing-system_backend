@@ -19,19 +19,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
-/**
- * BillService — all business logic for the Bill/Invoice module.
- *
- * This is the most complex service. Key responsibilities:
- *  - Validate all bill fields
- *  - Server-side GST computation (NEVER trust client values)
- *  - Auto-generate bill ID and unique share link
- *  - Convert total to Indian words
- *  - Coordinate with CustomerService when bill status changes
- *
- * @Transactional ensures the bill + items are saved atomically.
- * If anything fails, all DB changes are rolled back.
- */
 @Service
 @RequiredArgsConstructor
 public class BillService {
@@ -40,25 +27,15 @@ public class BillService {
     private final CustomerService customerService;
     private final IndianCurrencyUtil currencyUtil;
 
-    // Allowed GST rates per Indian GST law (Rule 3)
     private static final Set<Integer> VALID_GST_RATES = Set.of(0, 5, 12, 18, 28);
 
-    // Supplier GSTIN — always this constant (Rule 1)
     @Value("${app.supplier.gstin}")
     private String supplierGstin;
 
     @Value("${app.supplier.state-code}")
     private String supplierStateCode;
 
-    // ── GET ALL BILLS ─────────────────────────────────────────────────────────
-
-    /**
-     * Return all bills with optional filtering.
-     * Supports: status filter, search (by bill ID or customer name), customerId filter.
-     */
     public List<Bill> getAllBills(String status, String search, String customerId) {
-
-        // Filter by customer ID (for customer detail page)
         if (StringUtils.hasText(customerId)) {
             return billRepository.findByCustomerId(customerId);
         }
@@ -78,14 +55,10 @@ public class BillService {
         }
     }
 
-    // ── GET BILL BY ID ────────────────────────────────────────────────────────
-
     public Bill getBillById(String id) {
         return billRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Bill", id));
     }
-
-    // ── GET BILL BY UNIQUE LINK (Public) ──────────────────────────────────────
 
     public Bill getBillByUniqueLink(String uniqueLink) {
         return billRepository.findByUniqueLink(uniqueLink)
@@ -93,32 +66,8 @@ public class BillService {
                         "Bill with link '" + uniqueLink + "' not found"));
     }
 
-    // ── CREATE BILL ───────────────────────────────────────────────────────────
-
-    /**
-     * Create a new bill with full server-side GST computation.
-     *
-     * Step-by-step per the specification:
-     *  1.  Validate all fields
-     *  2.  Validate each item (name, qty > 0, price >= 0)
-     *  3.  Validate GST rate is in {0, 5, 12, 18, 28}
-     *  4.  Compute subtotal  = Σ(qty × price)
-     *  5.  Compute tax       = subtotal × gstRate%
-     *  6.  Compute CGST/SGST or IGST based on isInterState
-     *  7.  Compute total     = subtotal + tax
-     *  8.  Convert total to Indian words
-     *  9.  Generate bill ID: INV-YYYY-XXXXXX
-     *  10. Generate unique share link slug
-     *  11. Set all system constants (supplierGstin, currency)
-     *  12. Assign defaults (hsnSac, dueDate, notes)
-     *  13. Verify customerId exists
-     *  14. Insert bill into DB
-     *  15. Update customer.billsCount + 1
-     */
     @Transactional
     public Bill createBill(Bill billData, List<BillItem> items) {
-
-        // ── Step 1: Validate required fields ──────────────────────────────────
         if (!StringUtils.hasText(billData.getCustomerId())) {
             throw new BadRequestException("customerId is required");
         }
@@ -126,10 +75,9 @@ public class BillService {
             throw new BadRequestException("customerName is required");
         }
         if (items == null || items.isEmpty()) {
-            throw new BadRequestException("Bill must have at least one item (Rule 20)");
+            throw new BadRequestException("Bill must have at least one item");
         }
 
-        // ── Step 2: Validate each item ────────────────────────────────────────
         for (int i = 0; i < items.size(); i++) {
             BillItem item = items.get(i);
             if (!StringUtils.hasText(item.getName())) {
@@ -143,17 +91,13 @@ public class BillService {
             }
         }
 
-        // ── Step 3: Validate GST Rate ─────────────────────────────────────────
         int gstRateInt = billData.getGstRate() != null
                 ? billData.getGstRate().intValue() : 18;
         if (!VALID_GST_RATES.contains(gstRateInt)) {
-            throw new BadRequestException(
-                    "Invalid GST rate. Allowed values: 0, 5, 12, 18, 28");
+            throw new BadRequestException("Invalid GST rate. Allowed values: 0, 5, 12, 18, 28");
         }
         BigDecimal gstRate = new BigDecimal(gstRateInt);
 
-        // ── Step 4: Compute SUBTOTAL ──────────────────────────────────────────
-        // NEVER trust client-submitted totals (Rule 2)
         BigDecimal subtotal = BigDecimal.ZERO;
         for (BillItem item : items) {
             BigDecimal lineAmount = item.getQuantity().multiply(item.getPrice());
@@ -161,63 +105,45 @@ public class BillService {
         }
         subtotal = subtotal.setScale(2, RoundingMode.HALF_UP);
 
-        // ── Step 5: Compute TAX ───────────────────────────────────────────────
-        // tax = subtotal × (gstRate / 100)
         BigDecimal tax = subtotal
                 .multiply(gstRate)
                 .divide(new BigDecimal("100"), 2, RoundingMode.HALF_UP);
 
-        // ── Step 6: Determine inter-state supply and split tax ────────────────
-        // isInterState = (customer.stateCode != supplierStateCode)
-        // Default: intra-state (Karnataka to Karnataka)
         boolean isInterState = billData.isInterState();
 
         BigDecimal cgst, sgst, igst;
         if (isInterState) {
-            // Inter-state: IGST = full tax, CGST/SGST = 0
             cgst = BigDecimal.ZERO;
             sgst = BigDecimal.ZERO;
             igst = tax;
         } else {
-            // Intra-state: CGST = SGST = tax/2, IGST = 0
             BigDecimal halfTax = tax.divide(new BigDecimal("2"), 2, RoundingMode.HALF_UP);
             cgst = halfTax;
             sgst = halfTax;
             igst = BigDecimal.ZERO;
         }
 
-        // ── Step 7: Compute TOTAL ─────────────────────────────────────────────
         BigDecimal total = subtotal.add(tax).setScale(2, RoundingMode.HALF_UP);
 
-        // ── Step 8: Convert to Indian words ───────────────────────────────────
         String amountInWords = currencyUtil.numberToWords(total.doubleValue());
 
-        // ── Step 9: Generate Bill ID ──────────────────────────────────────────
-        // Format: INV-2026-XXXXXX (last 6 digits of current timestamp)
         String year = String.valueOf(LocalDate.now().getYear());
         String suffix = String.valueOf(System.currentTimeMillis()).substring(
                 String.valueOf(System.currentTimeMillis()).length() - 6);
         String billId = "INV-" + year + "-" + suffix;
 
-        // ── Step 10: Generate Unique Share Link ───────────────────────────────
-        // slug = customerName (lowercase, alphanumeric only)
         String slug = billData.getCustomerName()
                 .toLowerCase()
                 .replaceAll("[^a-z0-9]", "");
         String uniqueLink = "bill-" + slug + "-" + suffix;
 
-        // Ensure link is unique (very rare collision, but be safe)
         if (billRepository.existsByUniqueLink(uniqueLink)) {
             uniqueLink = uniqueLink + "-" + (System.currentTimeMillis() % 1000);
         }
 
-        // ── Step 11: Set System Constants ────────────────────────────────────
-        // Supplier GSTIN is ALWAYS the system constant (Rule 1)
-
-        // ── Step 12: Assign Defaults ──────────────────────────────────────────
         LocalDate dueDate = billData.getDueDate() != null
                 ? billData.getDueDate()
-                : LocalDate.now().plusDays(14);  // Default: 14 days from today (Rule 6)
+                : LocalDate.now().plusDays(14);
 
         String notes = StringUtils.hasText(billData.getNotes())
                 ? billData.getNotes()
@@ -236,10 +162,8 @@ public class BillService {
         String stateCode = StringUtils.hasText(billData.getStateCode())
                 ? billData.getStateCode() : "29";
 
-        // ── Step 13: Verify customer exists ──────────────────────────────────
         customerService.getCustomerById(billData.getCustomerId());
 
-        // ── Step 14: Build and save the Bill entity ───────────────────────────
         Bill bill = Bill.builder()
                 .id(billId)
                 .customerId(billData.getCustomerId())
@@ -265,7 +189,6 @@ public class BillService {
                 .notes(notes)
                 .build();
 
-        // Prepare items with computed amounts
         List<BillItem> billItems = new ArrayList<>();
         for (int i = 0; i < items.size(); i++) {
             BillItem item = items.get(i);
@@ -289,23 +212,15 @@ public class BillService {
 
         Bill savedBill = billRepository.save(bill);
 
-        // ── Step 15: Update customer bill count ───────────────────────────────
         customerService.incrementBillCount(billData.getCustomerId());
 
         return savedBill;
     }
 
-    // ── UPDATE BILL ───────────────────────────────────────────────────────────
-
-    /**
-     * Update an existing bill.
-     * Re-computes all financial fields from scratch (Rule 2).
-     */
     @Transactional
     public Bill updateBill(String id, Bill updatedData, List<BillItem> newItems) {
         Bill existing = getBillById(id);
 
-        // Update basic fields if provided
         if (StringUtils.hasText(updatedData.getCustomerName())) {
             existing.setCustomerName(updatedData.getCustomerName().trim());
         }
@@ -319,9 +234,7 @@ public class BillService {
             existing.setStatus(updatedData.getStatus());
         }
 
-        // If new items were provided, recompute all financials
         if (newItems != null && !newItems.isEmpty()) {
-            // Validate items
             for (int i = 0; i < newItems.size(); i++) {
                 BillItem item = newItems.get(i);
                 if (!StringUtils.hasText(item.getName())) {
@@ -335,20 +248,17 @@ public class BillService {
                 }
             }
 
-            // Re-determine GST rate
             int gstRateInt = updatedData.getGstRate() != null
                     ? updatedData.getGstRate().intValue()
                     : existing.getGstRate().intValue();
             BigDecimal gstRate = new BigDecimal(gstRateInt);
 
-            // Re-compute subtotal
             BigDecimal subtotal = BigDecimal.ZERO;
             for (BillItem item : newItems) {
                 subtotal = subtotal.add(item.getQuantity().multiply(item.getPrice()));
             }
             subtotal = subtotal.setScale(2, RoundingMode.HALF_UP);
 
-            // Re-compute tax and components
             BigDecimal tax = subtotal.multiply(gstRate)
                     .divide(new BigDecimal("100"), 2, RoundingMode.HALF_UP);
 
@@ -372,7 +282,6 @@ public class BillService {
             existing.setTotal(total);
             existing.setAmountInWords(currencyUtil.numberToWords(total.doubleValue()));
 
-            // Replace items
             existing.getItems().clear();
             for (int i = 0; i < newItems.size(); i++) {
                 BillItem item = newItems.get(i);
@@ -394,11 +303,6 @@ public class BillService {
         return billRepository.save(existing);
     }
 
-    // ── DELETE BILL ───────────────────────────────────────────────────────────
-
-    /**
-     * Hard delete a bill and update customer counters.
-     */
     @Transactional
     public void deleteBill(String id) {
         Bill bill = getBillById(id);
@@ -408,25 +312,16 @@ public class BillService {
 
         billRepository.delete(bill);
 
-        // Update customer counters
         customerService.decrementBillCount(customerId);
         if (wasPaid) {
-            // Reverse the totalSpent (subtract what was paid)
             customerService.addToTotalSpent(customerId, paidAmount.negate());
         }
     }
 
-    // ── MARK BILL AS PAID ─────────────────────────────────────────────────────
-
-    /**
-     * Mark a bill as PAID and update customer's total spend.
-     * Called by: admin marking manually, or PaymentService after payment.
-     */
     @Transactional
     public Bill markAsPaid(String id) {
         Bill bill = getBillById(id);
 
-        // Only mark as paid if currently PENDING or OVERDUE
         if (bill.getStatus() == Bill.BillStatus.PAID) {
             throw new BadRequestException("Bill is already marked as PAID");
         }
@@ -434,17 +329,11 @@ public class BillService {
         bill.setStatus(Bill.BillStatus.PAID);
         Bill savedBill = billRepository.save(bill);
 
-        // Update customer's totalSpent
         customerService.addToTotalSpent(bill.getCustomerId(), bill.getTotal());
 
         return savedBill;
     }
 
-    // ── GET STATS ─────────────────────────────────────────────────────────────
-
-    /**
-     * Return revenue and count statistics for the reports module.
-     */
     public java.util.Map<String, Object> getBillStats() {
         BigDecimal totalRevenue = billRepository.getTotalRevenue();
         long paidCount = billRepository.countByStatus(Bill.BillStatus.PAID);
@@ -461,29 +350,17 @@ public class BillService {
         );
     }
 
-    // ── GENERATE SHARE LINK ───────────────────────────────────────────────────
-
-    /**
-     * Return the shareable URL for a bill.
-     */
     public String generateShareLink(String billId, String baseUrl) {
         Bill bill = getBillById(billId);
         return baseUrl + "/bill/view/" + bill.getUniqueLink();
     }
 
-    // ── MARK OVERDUE (can be called by scheduled job) ─────────────────────────
-
-    /**
-     * Auto-flag all past-due PENDING bills as OVERDUE.
-     */
     @Transactional
     public void markOverdueBills() {
         List<Bill> overdueBills = billRepository.findOverdueBills(LocalDate.now());
         overdueBills.forEach(bill -> bill.setStatus(Bill.BillStatus.OVERDUE));
         billRepository.saveAll(overdueBills);
     }
-
-    // ── HELPER ───────────────────────────────────────────────────────────────
 
     private Bill.BillStatus parseBillStatus(String status) {
         try {
