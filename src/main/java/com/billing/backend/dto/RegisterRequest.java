@@ -9,16 +9,15 @@ import lombok.Data;
 public class RegisterRequest {
 
     @NotBlank(message = "Name is required")
-    @Size(min = 2, message = "Name must be at least 2 characters")
+    @Size(min = 4, message = "Name must be at least 4 characters")
     private String name;
 
     @NotBlank(message = "Email is required")
     @Email(message = "Invalid email format")
     private String email;
 
-    private String company;
+    @NotBlank(message = "Phone Number  is required")
+    @Size(min = 10, max = 10, message = "Phone number must be exactly 10 digits")
+    private String phone;
 
-    @NotBlank(message = "Password is required")
-    @Size(min = 8, message = "Password must be at least 8 characters")
-    private String password;
 }

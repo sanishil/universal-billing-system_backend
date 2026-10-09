@@ -9,13 +9,17 @@ import com.billing.backend.repository.PasswordResetTokenRepository;
 import com.billing.backend.repository.UserRepository;
 import com.billing.backend.util.JwtUtil;
 import lombok.RequiredArgsConstructor;
+import org.springframework.mail.SimpleMailMessage;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
-
+import org.springframework.mail.javamail.JavaMailSender;
 import java.security.SecureRandom;
 import java.time.LocalDateTime;
 import java.util.HexFormat;
 import java.util.Optional;
+import java.util.random.RandomGenerator;
+
+
 
 @Service
 @RequiredArgsConstructor
@@ -25,7 +29,7 @@ public class AuthService {
     private final PasswordResetTokenRepository tokenRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtUtil jwtUtil;
-
+    private final JavaMailSender mailSender;
     public User login(String usernameOrEmail, String password) {
         Optional<User> userOpt;
         if (usernameOrEmail.contains("@")) {
@@ -78,18 +82,30 @@ public class AuthService {
         return user;
     }
 
-    public User register(String name, String email, String company, String password) {
+    public User register(String name, String email, String phone) {
         if (userRepository.existsByEmail(email)) {
             throw new ConflictException(
                 "An account with email \"" + email + "\" already exists. Please login or use a different email.");
         }
-
-        if (password == null || password.length() < 8) {
-            throw new BadRequestException("Password must be at least 8 characters long.");
+        if (userRepository.existsByPhone(phone)) {
+            throw new ConflictException(
+                    "An account with phone number \"" + phone + "\" already exists. Please login or use a different phone.");
         }
 
         long count = userRepository.count();
         String userId = "USR-" + String.format("%02d", count + 1);
+
+//      Auto password generating
+        String characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        SecureRandom random = new SecureRandom();
+
+        StringBuilder passwordBuilder = new StringBuilder();
+
+        for (int i = 0; i < 10; i++) {
+            passwordBuilder.append(characters.charAt(random.nextInt(characters.length())));
+        }
+
+        String password = passwordBuilder.toString();
 
         String hashedPassword = passwordEncoder.encode(password);
 
@@ -97,6 +113,7 @@ public class AuthService {
                 .id(userId)
                 .name(name)
                 .email(email)
+                .phone(phone)
                 .username(email.split("@")[0])
                 .passwordHash(hashedPassword)
                 .role("Administrator")
@@ -104,6 +121,25 @@ public class AuthService {
                 .loginAttempts(0)
                 .build();
 
+        // Send email
+        SimpleMailMessage message = new SimpleMailMessage();
+
+        message.setFrom("sanishil.cse@gmail.com");
+        message.setTo(email);
+        message.setSubject("Universal Billing System - Account Created");
+
+        message.setText(
+                "Hello " + name + ",\n\n" +
+                        "Your account has been successfully created.\n\n" +
+                        "Username: " + email + "\n" +
+                        "Password: " + password + "\n\n" +
+                        "Please login and change your password after your first login.\n\n" +
+                        "Regards,\n" +
+                        "Universal Billing System"
+        );
+
+        mailSender.send(message);
+        // Only one save + return
         return userRepository.save(newUser);
     }
 

@@ -78,8 +78,7 @@ public class AuthController {
         User user = authService.register(
                 request.getName(),
                 request.getEmail(),
-                request.getCompany(),
-                request.getPassword()
+                request.getPhone()
         );
 
         String token = authService.generateToken(user);
@@ -91,6 +90,7 @@ public class AuthController {
                         .name(user.getName())
                         .email(user.getEmail())
                         .role(user.getRole())
+                        .phone(user.getPhone())
                         .build())
                 .build();
 

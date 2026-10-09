@@ -29,6 +29,9 @@ public class User {
     @Column(name = "username", unique = true, length = 50)
     private String username;
 
+    @Column(name = "phone", nullable = false, unique = true, length = 10)
+    private String phone;
+
     @Column(name = "password_hash", nullable = false, length = 255)
     private String passwordHash;
 
