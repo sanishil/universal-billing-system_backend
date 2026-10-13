@@ -1,21 +1,35 @@
 package com.billing.backend.service;
 
 import com.billing.backend.entity.Customer;
+import com.billing.backend.entity.User;
 import com.billing.backend.exception.BadRequestException;
+import com.billing.backend.exception.ConflictException;
 import com.billing.backend.exception.ResourceNotFoundException;
 import com.billing.backend.repository.CustomerRepository;
+import com.billing.backend.repository.UserRepository;
+import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
+import org.springframework.mail.SimpleMailMessage;
+import org.springframework.mail.javamail.JavaMailSender;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
 import java.math.BigDecimal;
+import java.security.SecureRandom;
 import java.util.List;
+
 
 @Service
 @RequiredArgsConstructor
 public class CustomerService {
 
+    private final UserRepository userRepository;
     private final CustomerRepository customerRepository;
+    private final PasswordEncoder passwordEncoder;
+    private final JavaMailSender mailSender;
 
     public List<Customer> getAllCustomers(String search, Customer.CustomerStatus status) {
         boolean hasSearch = StringUtils.hasText(search);
@@ -37,7 +51,8 @@ public class CustomerService {
                 .orElseThrow(() -> new ResourceNotFoundException("Customer", id));
     }
 
-    public Customer createCustomer(Customer customerData) {
+    @Transactional
+    public Customer createCustomer(Customer customerData, String email, String phone) {
         if (!StringUtils.hasText(customerData.getName())) {
             throw new BadRequestException("Customer name is required");
         }
@@ -48,7 +63,10 @@ public class CustomerService {
         if (!customerData.getEmail().matches("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$")) {
             throw new BadRequestException("Invalid email format");
         }
-
+        if (customerRepository.existsByEmail(email)) {
+            throw new ConflictException(
+                    "An account with email \"" + email + "\" already exists.");
+        }
         if (StringUtils.hasText(customerData.getGstin())) {
             String gstin = customerData.getGstin().trim();
             if (gstin.length() != 15) {
@@ -68,16 +86,38 @@ public class CustomerService {
                 throw new BadRequestException("Invalid PAN format. Expected: AAAAA9999A");
             }
         }
+        if (customerRepository.existsByPhone(phone)) {
+            throw new ConflictException(
+                    "An account with phone \"" + phone + "\" already exists.");
+        }
 
         long count = customerRepository.count();
         String customerId = "CUST-" + String.format("%03d", count + 1);
 
+        // Get the currently logged-in user's name from JWT via SecurityContext
+        UsernamePasswordAuthenticationToken auth =
+                (UsernamePasswordAuthenticationToken) SecurityContextHolder
+                        .getContext().getAuthentication();
+        String loginUserName = (auth != null && auth.getDetails() != null)
+                ? auth.getDetails().toString()
+                : "Unknown";
+
+        // Generate a unique userId — if it already exists in users table, keep incrementing
+        long userIdCounter = count + 1;
+        String userId = "USR-" + String.format("%02d", userIdCounter);
+        while (userRepository.existsById(userId)) {
+            userIdCounter++;
+            userId = "USR-" + String.format("%02d", userIdCounter);
+        }
+
+//        insert data into customer table
         Customer customer = Customer.builder()
                 .id(customerId)
+                .userid(userId)
                 .name(customerData.getName().trim())
                 .email(customerData.getEmail().trim().toLowerCase())
                 .phone(StringUtils.hasText(customerData.getPhone())
-                        ? customerData.getPhone() : "+91 98000 00000")
+                        ? customerData.getPhone() : "1234567890")
                 .address(StringUtils.hasText(customerData.getAddress())
                         ? customerData.getAddress() : "Bengaluru, Karnataka, India")
                 .company(StringUtils.hasText(customerData.getCompany())
@@ -95,7 +135,55 @@ public class CustomerService {
                 .status(Customer.CustomerStatus.ACTIVE)
                 .build();
 
-        return customerRepository.save(customer);
+// Insert specific data into user table for login
+        //      Auto password generating
+        String characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        SecureRandom random = new SecureRandom();
+
+        StringBuilder passwordBuilder = new StringBuilder();
+
+        for (int i = 0; i < 10; i++) {
+            passwordBuilder.append(characters.charAt(random.nextInt(characters.length())));
+        }
+
+        String password = passwordBuilder.toString();
+
+        String hashedPassword = passwordEncoder.encode(password);
+
+        User newUser = User.builder()
+                .id(userId)
+                .name(customerData.getName().trim())
+                .email(customerData.getEmail().trim().toLowerCase())
+                .phone(StringUtils.hasText(customerData.getPhone()) ? customerData.getPhone() : "1234567890")
+                .username(email.split("@")[0])
+                .passwordHash(hashedPassword)
+                .role("Administrator")
+                .status(User.UserStatus.ACTIVE)
+                .loginAttempts(0)
+                .build();
+
+        // Send email
+        SimpleMailMessage message = new SimpleMailMessage();
+
+        message.setFrom("sanishil.cse@gmail.com");
+        message.setTo(email);
+        message.setSubject("Universal Billing System - Account Created");
+        message.setText(
+                "Hello " + customerData.getName().trim() + ",\n\n" +
+                        "Your account has been successfully created in the Universal Billing System.\n\n" +
+                        "Created By: " + loginUserName + "\n\n" +
+                        "Login Credentials:\n" +
+                        "Username: " + email + "\n" +
+                        "Password: " + password + "\n\n" +
+                        "Please log in using the above credentials and verify your account details. " +
+                        "For security reasons, we strongly recommend changing your password after your first login.\n\n" +
+                        "Regards,\n" +
+                        "Universal Billing System"
+        );
+        userRepository.save(newUser);
+        customerRepository.save(customer);
+        mailSender.send(message);
+        return customer;
     }
 
     public Customer updateCustomer(String id, Customer updatedData) {

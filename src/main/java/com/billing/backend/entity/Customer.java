@@ -21,13 +21,15 @@ public class Customer {
     @Column(name = "id", length = 20)
     private String id;
 
+    @Column(name = "userid", length = 20, nullable = false)
+    private String userid;
     @Column(name = "name", nullable = false, length = 150)
     private String name;
 
     @Column(name = "email", nullable = false, length = 150)
     private String email;
 
-    @Column(name = "phone", nullable = false, length = 30)
+    @Column(name = "phone", nullable = false, length = 10)
     private String phone;
 
     @Column(name = "address", nullable = false, columnDefinition = "TEXT")
