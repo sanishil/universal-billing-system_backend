@@ -38,6 +38,8 @@ public class ReportsService {
         stats.put("pendingCount",  pendingCount);
         stats.put("overdueCount",  overdueCount);
         stats.put("totalCount",    totalCount);
+        stats.put("gstCollected",  billRepository.getGstCollected());
+        stats.put("nonGstSales",   billRepository.getNonGstSales());
         return stats;
     }
 

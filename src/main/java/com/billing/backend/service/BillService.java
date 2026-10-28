@@ -1,11 +1,14 @@
 package com.billing.backend.service;
 
+import com.billing.backend.dto.GstBreakdown;
 import com.billing.backend.entity.Bill;
 import com.billing.backend.entity.BillItem;
+import com.billing.backend.entity.Customer;
 import com.billing.backend.exception.BadRequestException;
 import com.billing.backend.exception.ResourceNotFoundException;
 import com.billing.backend.repository.BillRepository;
 import com.billing.backend.util.IndianCurrencyUtil;
+import com.billing.backend.util.TokenGenerator;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -13,11 +16,10 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -25,9 +27,13 @@ public class BillService {
 
     private final BillRepository billRepository;
     private final CustomerService customerService;
+    private final SettingsService settingsService;
+    private final GstCalculator gstCalculator;
+    private final TokenGenerator tokenGenerator;
     private final IndianCurrencyUtil currencyUtil;
 
-    private static final Set<Integer> VALID_GST_RATES = Set.of(0, 5, 12, 18, 28);
+    // Old share links looked like "bill-<customer>-<6 digits>" and could be guessed
+    private static final String LEGACY_LINK_PREFIX = "bill-";
 
     @Value("${app.supplier.gstin}")
     private String supplierGstin;
@@ -62,84 +68,43 @@ public class BillService {
 
     public Bill getBillByUniqueLink(String uniqueLink) {
         return billRepository.findByUniqueLink(uniqueLink)
-                .orElseThrow(() -> new ResourceNotFoundException(
-                        "Bill with link '" + uniqueLink + "' not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Bill not found"));
     }
 
+    /**
+     * @param gstRateProvided true when the client sent the gstRate key (null then means No GST);
+     *                        false → use the system default rate
+     */
     @Transactional
-    public Bill createBill(Bill billData, List<BillItem> items) {
+    public Bill createBill(Bill billData, List<BillItem> items, boolean gstRateProvided) {
         if (!StringUtils.hasText(billData.getCustomerId())) {
             throw new BadRequestException("customerId is required");
         }
         if (!StringUtils.hasText(billData.getCustomerName())) {
             throw new BadRequestException("customerName is required");
         }
-        if (items == null || items.isEmpty()) {
-            throw new BadRequestException("Bill must have at least one item");
-        }
+        validateItems(items);
 
-        for (int i = 0; i < items.size(); i++) {
-            BillItem item = items.get(i);
-            if (!StringUtils.hasText(item.getName())) {
-                throw new BadRequestException("items[" + i + "].name is required");
-            }
-            if (item.getQuantity() == null || item.getQuantity().compareTo(BigDecimal.ZERO) <= 0) {
-                throw new BadRequestException("items[" + i + "].quantity must be greater than 0");
-            }
-            if (item.getPrice() == null || item.getPrice().compareTo(BigDecimal.ZERO) < 0) {
-                throw new BadRequestException("items[" + i + "].price must be >= 0");
-            }
-        }
+        BigDecimal gstRate = validateGstRate(
+                gstRateProvided ? billData.getGstRate() : settingsService.getDefaultGstRate());
 
-        int gstRateInt = billData.getGstRate() != null
-                ? billData.getGstRate().intValue() : 18;
-        if (!VALID_GST_RATES.contains(gstRateInt)) {
-            throw new BadRequestException("Invalid GST rate. Allowed values: 0, 5, 12, 18, 28");
-        }
-        BigDecimal gstRate = new BigDecimal(gstRateInt);
+        Customer customer = customerService.getCustomerById(billData.getCustomerId());
 
-        BigDecimal subtotal = BigDecimal.ZERO;
-        for (BillItem item : items) {
-            BigDecimal lineAmount = item.getQuantity().multiply(item.getPrice());
-            subtotal = subtotal.add(lineAmount);
-        }
-        subtotal = subtotal.setScale(2, RoundingMode.HALF_UP);
+        String stateCode = StringUtils.hasText(billData.getStateCode())
+                ? billData.getStateCode().trim()
+                : (StringUtils.hasText(customer.getStateCode()) ? customer.getStateCode() : supplierStateCode);
 
-        BigDecimal tax = subtotal
-                .multiply(gstRate)
-                .divide(new BigDecimal("100"), 2, RoundingMode.HALF_UP);
+        String placeOfSupply = StringUtils.hasText(billData.getPlaceOfSupply())
+                ? billData.getPlaceOfSupply()
+                : (StringUtils.hasText(customer.getState())
+                        ? customer.getState() + " (" + stateCode + ")" : "Karnataka (29)");
 
-        boolean isInterState = billData.isInterState();
-
-        BigDecimal cgst, sgst, igst;
-        if (isInterState) {
-            cgst = BigDecimal.ZERO;
-            sgst = BigDecimal.ZERO;
-            igst = tax;
-        } else {
-            BigDecimal halfTax = tax.divide(new BigDecimal("2"), 2, RoundingMode.HALF_UP);
-            cgst = halfTax;
-            sgst = halfTax;
-            igst = BigDecimal.ZERO;
-        }
-
-        BigDecimal total = subtotal.add(tax).setScale(2, RoundingMode.HALF_UP);
-
-        String amountInWords = currencyUtil.numberToWords(total.doubleValue());
+        GstBreakdown totals = gstCalculator.calculate(items, gstRate, supplierStateCode, stateCode);
 
         String year = String.valueOf(LocalDate.now().getYear());
         String suffix = String.valueOf(System.currentTimeMillis()).substring(
                 String.valueOf(System.currentTimeMillis()).length() - 6);
         String billId = "INV-" + year + "-" + suffix;
-
-        String slug = billData.getCustomerName()
-                .toLowerCase()
-                .replaceAll("[^a-z0-9]", "");
-        String uniqueLink = "bill-" + slug + "-" + suffix;
-
-        if (billRepository.existsByUniqueLink(uniqueLink)) {
-            uniqueLink = uniqueLink + "-" + (System.currentTimeMillis() % 1000);
-        }
 
         LocalDate dueDate = billData.getDueDate() != null
                 ? billData.getDueDate()
@@ -150,65 +115,27 @@ public class BillService {
                 : "Thank you for choosing Universal Billing System. " +
                   "Payment via UPI or Net Banking appreciated.";
 
-        String pan = StringUtils.hasText(billData.getPan())
-                ? billData.getPan() : "AAAAA0000A";
-
-        String customerGstin = StringUtils.hasText(billData.getCustomerGstin())
-                ? billData.getCustomerGstin() : "29AAAAA0000A1Z5";
-
-        String placeOfSupply = StringUtils.hasText(billData.getPlaceOfSupply())
-                ? billData.getPlaceOfSupply() : "Karnataka (29)";
-
-        String stateCode = StringUtils.hasText(billData.getStateCode())
-                ? billData.getStateCode() : "29";
-
-        customerService.getCustomerById(billData.getCustomerId());
+        String pan = firstNonBlank(billData.getPan(), customer.getPan());
+        String customerGstin = firstNonBlank(billData.getCustomerGstin(), customer.getGstin());
 
         Bill bill = Bill.builder()
                 .id(billId)
                 .customerId(billData.getCustomerId())
                 .customerName(billData.getCustomerName().trim())
-                .customerGstin(customerGstin.toUpperCase())
+                .customerGstin(customerGstin != null ? customerGstin.toUpperCase() : null)
                 .supplierGstin(supplierGstin)
-                .pan(pan.toUpperCase())
+                .pan(pan != null ? pan.toUpperCase() : null)
                 .placeOfSupply(placeOfSupply)
                 .stateCode(stateCode)
-                .isInterState(isInterState)
-                .gstRate(gstRate)
-                .subtotal(subtotal)
-                .cgst(cgst)
-                .sgst(sgst)
-                .igst(igst)
-                .tax(tax)
-                .total(total)
-                .amountInWords(amountInWords)
                 .currency("INR")
                 .status(billData.getStatus() != null ? billData.getStatus() : Bill.BillStatus.PENDING)
-                .uniqueLink(uniqueLink)
+                .uniqueLink(newUniqueLink())
                 .dueDate(dueDate)
                 .notes(notes)
                 .build();
 
-        List<BillItem> billItems = new ArrayList<>();
-        for (int i = 0; i < items.size(); i++) {
-            BillItem item = items.get(i);
-            String itemId = "item-" + System.currentTimeMillis() + "-" + i;
-            BigDecimal amount = item.getQuantity()
-                    .multiply(item.getPrice())
-                    .setScale(2, RoundingMode.HALF_UP);
-
-            BillItem savedItem = BillItem.builder()
-                    .id(itemId)
-                    .bill(bill)
-                    .name(item.getName().trim())
-                    .hsnSac(StringUtils.hasText(item.getHsnSac()) ? item.getHsnSac() : "998314")
-                    .quantity(item.getQuantity())
-                    .price(item.getPrice())
-                    .amount(amount)
-                    .build();
-            billItems.add(savedItem);
-        }
-        bill.setItems(billItems);
+        applyTotals(bill, totals);
+        bill.setItems(buildItems(bill, items));
 
         Bill savedBill = billRepository.save(bill);
 
@@ -217,8 +144,12 @@ public class BillService {
         return savedBill;
     }
 
+    /**
+     * @param gstRateProvided true when the client sent the gstRate key (null then means No GST);
+     *                        false → keep the bill's current rate
+     */
     @Transactional
-    public Bill updateBill(String id, Bill updatedData, List<BillItem> newItems) {
+    public Bill updateBill(String id, Bill updatedData, List<BillItem> newItems, boolean gstRateProvided) {
         Bill existing = getBillById(id);
 
         if (StringUtils.hasText(updatedData.getCustomerName())) {
@@ -234,70 +165,21 @@ public class BillService {
             existing.setStatus(updatedData.getStatus());
         }
 
-        if (newItems != null && !newItems.isEmpty()) {
-            for (int i = 0; i < newItems.size(); i++) {
-                BillItem item = newItems.get(i);
-                if (!StringUtils.hasText(item.getName())) {
-                    throw new BadRequestException("items[" + i + "].name is required");
-                }
-                if (item.getQuantity() == null || item.getQuantity().compareTo(BigDecimal.ZERO) <= 0) {
-                    throw new BadRequestException("items[" + i + "].quantity must be > 0");
-                }
-                if (item.getPrice() == null || item.getPrice().compareTo(BigDecimal.ZERO) < 0) {
-                    throw new BadRequestException("items[" + i + "].price must be >= 0");
-                }
+        boolean hasNewItems = newItems != null && !newItems.isEmpty();
+        if (hasNewItems || gstRateProvided) {
+            BigDecimal gstRate = gstRateProvided
+                    ? validateGstRate(updatedData.getGstRate())
+                    : existing.getGstRate();
+
+            if (hasNewItems) {
+                validateItems(newItems);
+                existing.getItems().clear();
+                existing.getItems().addAll(buildItems(existing, newItems));
             }
 
-            int gstRateInt = updatedData.getGstRate() != null
-                    ? updatedData.getGstRate().intValue()
-                    : existing.getGstRate().intValue();
-            BigDecimal gstRate = new BigDecimal(gstRateInt);
-
-            BigDecimal subtotal = BigDecimal.ZERO;
-            for (BillItem item : newItems) {
-                subtotal = subtotal.add(item.getQuantity().multiply(item.getPrice()));
-            }
-            subtotal = subtotal.setScale(2, RoundingMode.HALF_UP);
-
-            BigDecimal tax = subtotal.multiply(gstRate)
-                    .divide(new BigDecimal("100"), 2, RoundingMode.HALF_UP);
-
-            boolean isInterState = existing.isInterState();
-            BigDecimal cgst, sgst, igst;
-            if (isInterState) {
-                cgst = BigDecimal.ZERO; sgst = BigDecimal.ZERO; igst = tax;
-            } else {
-                BigDecimal half = tax.divide(new BigDecimal("2"), 2, RoundingMode.HALF_UP);
-                cgst = half; sgst = half; igst = BigDecimal.ZERO;
-            }
-
-            BigDecimal total = subtotal.add(tax).setScale(2, RoundingMode.HALF_UP);
-
-            existing.setGstRate(gstRate);
-            existing.setSubtotal(subtotal);
-            existing.setCgst(cgst);
-            existing.setSgst(sgst);
-            existing.setIgst(igst);
-            existing.setTax(tax);
-            existing.setTotal(total);
-            existing.setAmountInWords(currencyUtil.numberToWords(total.doubleValue()));
-
-            existing.getItems().clear();
-            for (int i = 0; i < newItems.size(); i++) {
-                BillItem item = newItems.get(i);
-                BigDecimal amount = item.getQuantity().multiply(item.getPrice())
-                        .setScale(2, RoundingMode.HALF_UP);
-                BillItem bi = BillItem.builder()
-                        .id("item-" + System.currentTimeMillis() + "-" + i)
-                        .bill(existing)
-                        .name(item.getName().trim())
-                        .hsnSac(StringUtils.hasText(item.getHsnSac()) ? item.getHsnSac() : "998314")
-                        .quantity(item.getQuantity())
-                        .price(item.getPrice())
-                        .amount(amount)
-                        .build();
-                existing.getItems().add(bi);
-            }
+            GstBreakdown totals = gstCalculator.calculate(
+                    existing.getItems(), gstRate, supplierStateCode, existing.getStateCode());
+            applyTotals(existing, totals);
         }
 
         return billRepository.save(existing);
@@ -350,9 +232,18 @@ public class BillService {
         );
     }
 
-    public String generateShareLink(String billId, String baseUrl) {
+    /**
+     * Returns the absolute public URL. Bills that still have an old guessable link
+     * get a new random token, so the old link stops working.
+     */
+    @Transactional
+    public String generateShareLink(String billId, String publicBaseUrl) {
         Bill bill = getBillById(billId);
-        return baseUrl + "/bill/view/" + bill.getUniqueLink();
+        if (bill.getUniqueLink() == null || bill.getUniqueLink().startsWith(LEGACY_LINK_PREFIX)) {
+            bill.setUniqueLink(newUniqueLink());
+            billRepository.save(bill);
+        }
+        return publicBaseUrl + "/bill/view/" + bill.getUniqueLink();
     }
 
     @Transactional
@@ -360,6 +251,82 @@ public class BillService {
         List<Bill> overdueBills = billRepository.findOverdueBills(LocalDate.now());
         overdueBills.forEach(bill -> bill.setStatus(Bill.BillStatus.OVERDUE));
         billRepository.saveAll(overdueBills);
+    }
+
+    private void validateItems(List<BillItem> items) {
+        if (items == null || items.isEmpty()) {
+            throw new BadRequestException("Bill must have at least one item");
+        }
+        for (int i = 0; i < items.size(); i++) {
+            BillItem item = items.get(i);
+            if (!StringUtils.hasText(item.getName())) {
+                throw new BadRequestException("items[" + i + "].name is required");
+            }
+            if (item.getQuantity() == null || item.getQuantity().compareTo(BigDecimal.ZERO) <= 0) {
+                throw new BadRequestException("items[" + i + "].quantity must be greater than 0");
+            }
+            if (item.getPrice() == null || item.getPrice().compareTo(BigDecimal.ZERO) < 0) {
+                throw new BadRequestException("items[" + i + "].price must be >= 0");
+            }
+        }
+    }
+
+    /** null (No GST) is always allowed; any other rate must be in the settings list. */
+    private BigDecimal validateGstRate(BigDecimal gstRate) {
+        if (gstRate == null) {
+            return null;
+        }
+        List<BigDecimal> allowed = settingsService.getAllowedGstRates();
+        boolean ok = allowed.stream().anyMatch(r -> r.compareTo(gstRate) == 0);
+        if (!ok) {
+            String list = allowed.stream().map(BigDecimal::toPlainString).collect(Collectors.joining(", "));
+            throw new BadRequestException("Invalid GST rate. Allowed values: " + list + ", or null for No GST");
+        }
+        return gstRate;
+    }
+
+    private void applyTotals(Bill bill, GstBreakdown totals) {
+        bill.setGstRate(totals.gstRate());
+        bill.setInterState(totals.interState());
+        bill.setSubtotal(totals.subtotal());
+        bill.setCgst(totals.cgst());
+        bill.setSgst(totals.sgst());
+        bill.setIgst(totals.igst());
+        bill.setTax(totals.tax());
+        bill.setTotal(totals.total());
+        bill.setAmountInWords(currencyUtil.numberToWords(totals.total().doubleValue()));
+    }
+
+    private List<BillItem> buildItems(Bill bill, List<BillItem> items) {
+        List<BillItem> billItems = new ArrayList<>();
+        long now = System.currentTimeMillis();
+        for (int i = 0; i < items.size(); i++) {
+            BillItem item = items.get(i);
+            billItems.add(BillItem.builder()
+                    .id("item-" + now + "-" + i)
+                    .bill(bill)
+                    .name(item.getName().trim())
+                    .hsnSac(StringUtils.hasText(item.getHsnSac()) ? item.getHsnSac() : "998314")
+                    .quantity(item.getQuantity())
+                    .price(item.getPrice())
+                    .amount(gstCalculator.lineAmount(item))
+                    .build());
+        }
+        return billItems;
+    }
+
+    private String newUniqueLink() {
+        String link;
+        do {
+            link = tokenGenerator.urlSafe(32);
+        } while (billRepository.existsByUniqueLink(link));
+        return link;
+    }
+
+    private static String firstNonBlank(String a, String b) {
+        if (StringUtils.hasText(a)) return a.trim();
+        if (StringUtils.hasText(b)) return b.trim();
+        return null;
     }
 
     private Bill.BillStatus parseBillStatus(String status) {

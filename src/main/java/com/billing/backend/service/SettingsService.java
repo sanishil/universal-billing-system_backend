@@ -2,6 +2,7 @@ package com.billing.backend.service;
 
 import com.billing.backend.entity.SystemSettings;
 import com.billing.backend.entity.User;
+import com.billing.backend.exception.BadRequestException;
 import com.billing.backend.exception.ResourceNotFoundException;
 import com.billing.backend.repository.SystemSettingsRepository;
 import com.billing.backend.repository.UserRepository;
@@ -10,8 +11,11 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -19,6 +23,10 @@ public class SettingsService {
 
     private final SystemSettingsRepository settingsRepository;
     private final UserRepository userRepository;
+
+    // GST slabs in force from 22 Sept 2025. Special rates (e.g. 3 for gold) can be added via settings.
+    public static final List<BigDecimal> DEFAULT_GST_RATES = List.of(
+            new BigDecimal("0"), new BigDecimal("5"), new BigDecimal("18"), new BigDecimal("40"));
 
     public Map<String, Object> getProfile(String userId) {
         User user = userRepository.findById(userId)
@@ -64,8 +72,21 @@ public class SettingsService {
     }
 
     public SystemSettings getSystemSettings() {
-        return settingsRepository.findById(1)
+        SystemSettings settings = settingsRepository.findById(1)
                 .orElseGet(this::createDefaultSettings);
+        if (settings.getGstRates() == null || settings.getGstRates().isEmpty()) {
+            settings.setGstRates(new ArrayList<>(DEFAULT_GST_RATES));
+        }
+        return settings;
+    }
+
+    public List<BigDecimal> getAllowedGstRates() {
+        return getSystemSettings().getGstRates();
+    }
+
+    /** Rate used when a new bill doesn't send gstRate at all. */
+    public BigDecimal getDefaultGstRate() {
+        return getSystemSettings().getTaxRate();
     }
 
     public SystemSettings updateSystemSettings(SystemSettings updatedSettings) {
@@ -76,6 +97,19 @@ public class SettingsService {
         }
         if (updatedSettings.getTaxRate() != null) {
             existing.setTaxRate(updatedSettings.getTaxRate());
+        }
+        if (updatedSettings.getGstRates() != null && !updatedSettings.getGstRates().isEmpty()) {
+            for (BigDecimal rate : updatedSettings.getGstRates()) {
+                if (rate == null || rate.compareTo(BigDecimal.ZERO) < 0
+                        || rate.compareTo(new BigDecimal("100")) > 0) {
+                    throw new BadRequestException("gstRates must be between 0 and 100");
+                }
+            }
+            existing.setGstRates(updatedSettings.getGstRates().stream()
+                    .map(BigDecimal::stripTrailingZeros)
+                    .distinct()
+                    .sorted()
+                    .collect(Collectors.toCollection(ArrayList::new)));
         }
         if (StringUtils.hasText(updatedSettings.getTaxLabel())) {
             existing.setTaxLabel(updatedSettings.getTaxLabel());

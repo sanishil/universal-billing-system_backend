@@ -43,6 +43,13 @@ public interface BillRepository extends JpaRepository<Bill, String> {
     @Query("SELECT COALESCE(SUM(b.total), 0) FROM Bill b WHERE b.status = 'PAID'")
     BigDecimal getTotalRevenue();
 
+    // Tax collected on paid GST bills only (No-GST bills have gstRate = NULL)
+    @Query("SELECT COALESCE(SUM(b.tax), 0) FROM Bill b WHERE b.status = 'PAID' AND b.gstRate IS NOT NULL")
+    BigDecimal getGstCollected();
+
+    @Query("SELECT COALESCE(SUM(b.total), 0) FROM Bill b WHERE b.status = 'PAID' AND b.gstRate IS NULL")
+    BigDecimal getNonGstSales();
+
     @Query("SELECT COUNT(b) FROM Bill b WHERE b.status = :status")
     long countByStatus(@Param("status") Bill.BillStatus status);
 

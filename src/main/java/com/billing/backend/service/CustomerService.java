@@ -9,6 +9,10 @@ import com.billing.backend.repository.CustomerRepository;
 import com.billing.backend.repository.UserRepository;
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.mail.SimpleMailMessage;
 import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
@@ -16,7 +20,6 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
-
 import java.math.BigDecimal;
 import java.security.SecureRandom;
 import java.util.List;
@@ -49,6 +52,21 @@ public class CustomerService {
     public Customer getCustomerById(String id) {
         return customerRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Customer", id));
+    }
+
+    public Page<Customer> getCustomers(String search, Customer.CustomerStatus status, int page, int size) {
+        int safePage = Math.max(page, 0);
+        int safeSize = (size < 1 || size > 100) ? 10 : size;
+        Pageable pageable = PageRequest.of(safePage, safeSize, Sort.by(Sort.Direction.DESC, "createdAt"));
+
+        if (StringUtils.hasText(search) && status != null) {
+            return customerRepository.searchByNameOrEmailAndStatus(search.trim(), status, pageable);
+        } else if (StringUtils.hasText(search)) {
+            return customerRepository.searchByNameOrEmail(search.trim(), pageable);
+        } else if (status != null) {
+            return customerRepository.findByStatus(status, pageable);
+        }
+        return customerRepository.findAll(pageable);
     }
 
     @Transactional
@@ -168,10 +186,12 @@ public class CustomerService {
         message.setFrom("sanishil.cse@gmail.com");
         message.setTo(email);
         message.setSubject("Universal Billing System - Account Created");
+
+
         message.setText(
                 "Hello " + customerData.getName().trim() + ",\n\n" +
                         "Your account has been successfully created in the Universal Billing System.\n\n" +
-                        "Created By: " + loginUserName + "\n\n" +
+                        "Created By: " + loginUserName + " for " + customer.getCompany().trim() + "\n\n" +
                         "Login Credentials:\n" +
                         "Username: " + email + "\n" +
                         "Password: " + password + "\n\n" +
@@ -180,6 +200,8 @@ public class CustomerService {
                         "Regards,\n" +
                         "Universal Billing System"
         );
+
+
         userRepository.save(newUser);
         customerRepository.save(customer);
         mailSender.send(message);

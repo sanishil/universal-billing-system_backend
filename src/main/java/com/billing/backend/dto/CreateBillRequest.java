@@ -1,5 +1,6 @@
 package com.billing.backend.dto;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.*;
 import lombok.Data;
@@ -22,9 +23,17 @@ public class CreateBillRequest {
     private String stateCode;
     private String pan;
 
-    private Boolean isInterState = false;
+    // Inter-state is no longer read from the client: the server derives it from
+    // the supplier state code vs. stateCode (or the customer's state code).
 
-    private Integer gstRate = 18;
+    /**
+     * GST percentage. Explicit null = No GST.
+     * Key omitted = system default rate (create) / keep current rate (update).
+     */
+    private BigDecimal gstRate;
+
+    @JsonIgnore
+    private boolean gstRateProvided;
 
     @NotNull(message = "items list is required")
     @Size(min = 1, message = "Bill must have at least one item")
@@ -34,6 +43,12 @@ public class CreateBillRequest {
     private String status;
     private LocalDate dueDate;
     private String notes;
+
+    // Jackson only calls this when the "gstRate" key is present, even if its value is null
+    public void setGstRate(BigDecimal gstRate) {
+        this.gstRate = gstRate;
+        this.gstRateProvided = true;
+    }
 
     @Data
     public static class BillItemDto {

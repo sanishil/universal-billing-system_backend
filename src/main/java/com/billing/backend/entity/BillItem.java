@@ -1,10 +1,13 @@
 package com.billing.backend.entity;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.persistence.*;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
+import lombok.EqualsAndHashCode;
 import lombok.NoArgsConstructor;
+import lombok.ToString;
 
 import java.math.BigDecimal;
 
@@ -20,8 +23,12 @@ public class BillItem {
     @Column(name = "id", length = 60)
     private String id;
 
+    // Back-reference: excluded from JSON/toString/equals to avoid Bill ↔ BillItem infinite recursion
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "bill_id", nullable = false)
+    @JsonIgnore
+    @ToString.Exclude
+    @EqualsAndHashCode.Exclude
     private Bill bill;
 
     @Column(name = "name", nullable = false, length = 200)

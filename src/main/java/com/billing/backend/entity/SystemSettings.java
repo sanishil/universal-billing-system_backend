@@ -8,6 +8,7 @@ import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Entity
 @Table(name = "system_settings")
@@ -28,6 +29,12 @@ public class SystemSettings {
     @Column(name = "tax_rate", precision = 5, scale = 2)
     @Builder.Default
     private BigDecimal taxRate = new BigDecimal("18.00");
+
+    // Allowed GST slabs (percent). NULL in DB → SettingsService.DEFAULT_GST_RATES.
+    // No @Builder.Default on purpose: a PUT body without this field must not reset it.
+    @Convert(converter = DecimalListConverter.class)
+    @Column(name = "gst_rates", length = 100)
+    private List<BigDecimal> gstRates;
 
     @Column(name = "tax_label", length = 20)
     @Builder.Default

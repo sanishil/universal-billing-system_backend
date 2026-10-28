@@ -129,21 +129,6 @@ public class PaymentService {
         return savedPayment;
     }
 
-    @Transactional
-    public void simulatePublicPayment(String uniqueLink) {
-        Bill bill = billRepository.findByUniqueLink(uniqueLink)
-                .orElseThrow(() -> new ResourceNotFoundException(
-                        "Bill with link '" + uniqueLink + "' not found"));
-
-        if (bill.getStatus() == Bill.BillStatus.PAID) {
-            throw new BadRequestException("This bill has already been paid");
-        }
-
-        bill.setStatus(Bill.BillStatus.PAID);
-        billRepository.save(bill);
-        customerService.addToTotalSpent(bill.getCustomerId(), bill.getTotal());
-    }
-
     private Payment.PaymentMethod parseMethod(String method) {
         try {
             return Payment.PaymentMethod.valueOf(method.toUpperCase());

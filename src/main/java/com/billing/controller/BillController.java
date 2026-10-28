@@ -11,8 +11,6 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.math.BigDecimal;
-import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -31,8 +29,9 @@ public class BillController {
 
     private final BillService billService;
 
-    @Value("${app.base-url}")
-    private String baseUrl;
+    // Frontend URL used in share links (must be a single URL, not the CORS list)
+    @Value("${app.public-base-url}")
+    private String publicBaseUrl;
 
     // ── GET /api/bills/stats ───────────────────────────────────────────────────
     // IMPORTANT: This must come before /{id} to avoid route conflict
@@ -63,12 +62,6 @@ public class BillController {
         return ResponseEntity.ok(billService.getBillById(id));
     }
 
-    // ── GET /api/bills/link/:uniqueLink (PUBLIC) ───────────────────────────────
-    @GetMapping("/link/{uniqueLink}")
-    public ResponseEntity<Bill> getBillByLink(@PathVariable String uniqueLink) {
-        return ResponseEntity.ok(billService.getBillByUniqueLink(uniqueLink));
-    }
-
     // ── POST /api/bills ────────────────────────────────────────────────────────
     /**
      * Create a new bill. All GST computation happens server-side.
@@ -84,9 +77,7 @@ public class BillController {
                 .placeOfSupply(request.getPlaceOfSupply())
                 .stateCode(request.getStateCode())
                 .pan(request.getPan())
-                .isInterState(Boolean.TRUE.equals(request.getIsInterState()))
-                .gstRate(request.getGstRate() != null
-                        ? new BigDecimal(request.getGstRate()) : new BigDecimal("18"))
+                .gstRate(request.getGstRate())
                 .dueDate(request.getDueDate())
                 .notes(request.getNotes())
                 .build();
@@ -107,7 +98,7 @@ public class BillController {
                         .build())
                 .collect(Collectors.toList());
 
-        Bill created = billService.createBill(billData, items);
+        Bill created = billService.createBill(billData, items, request.isGstRateProvided());
         return ResponseEntity.status(HttpStatus.CREATED).body(created);
     }
 
@@ -119,8 +110,7 @@ public class BillController {
 
         Bill billData = Bill.builder()
                 .customerName(request.getCustomerName())
-                .gstRate(request.getGstRate() != null
-                        ? new BigDecimal(request.getGstRate()) : null)
+                .gstRate(request.getGstRate())
                 .dueDate(request.getDueDate())
                 .notes(request.getNotes())
                 .build();
@@ -143,7 +133,7 @@ public class BillController {
                     .collect(Collectors.toList());
         }
 
-        return ResponseEntity.ok(billService.updateBill(id, billData, items));
+        return ResponseEntity.ok(billService.updateBill(id, billData, items, request.isGstRateProvided()));
     }
 
     // ── DELETE /api/bills/:id ──────────────────────────────────────────────────
@@ -164,7 +154,7 @@ public class BillController {
     public ResponseEntity<Map<String, String>> generateLink(
             @RequestBody Map<String, String> body) {
         String billId = body.get("billId");
-        String shareUrl = billService.generateShareLink(billId, baseUrl);
+        String shareUrl = billService.generateShareLink(billId, publicBaseUrl);
         return ResponseEntity.ok(Map.of("url", shareUrl));
     }
 }

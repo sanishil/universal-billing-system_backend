@@ -4,6 +4,7 @@ import com.billing.backend.security.JwtAuthFilter;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
@@ -51,7 +52,11 @@ public class SecurityConfig {
                     "/api/auth/forgot-password",
                     "/api/auth/reset-password",
                     "/api/auth/resend-activation",
-                    "/api/auth/account-status",
+                    "/api/auth/account-status"
+                ).permitAll()
+                // Public share link is read-only: no PATCH/POST (e.g. "pay") without login
+                .requestMatchers(HttpMethod.GET,
+                    "/api/bills/link/**",
                     "/api/bill/public/**"
                 ).permitAll()
                 .anyRequest().authenticated()

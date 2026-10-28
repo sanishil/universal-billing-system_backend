@@ -1,5 +1,6 @@
 package com.billing.backend.entity;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.*;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -54,9 +55,9 @@ public class Bill {
     @OneToMany(mappedBy = "bill", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.EAGER)
     private List<BillItem> items;
 
+    // NULL = No GST (Bill of Supply). Computed fields below are then all zero.
     @Column(name = "gst_rate", precision = 5, scale = 2)
-    @Builder.Default
-    private BigDecimal gstRate = new BigDecimal("18.00");
+    private BigDecimal gstRate;
 
     @Column(name = "subtotal", nullable = false, precision = 15, scale = 2)
     private BigDecimal subtotal;
@@ -105,6 +106,11 @@ public class Bill {
 
     @Column(name = "notes", columnDefinition = "TEXT")
     private String notes;
+
+    @JsonProperty("gstApplicable")
+    public boolean isGstApplicable() {
+        return gstRate != null;
+    }
 
     @PrePersist
     protected void onCreate() {
