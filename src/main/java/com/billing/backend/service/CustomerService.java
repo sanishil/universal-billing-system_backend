@@ -1,5 +1,6 @@
 package com.billing.backend.service;
 
+import com.billing.backend.entity.Business;
 import com.billing.backend.entity.Customer;
 import com.billing.backend.entity.User;
 import com.billing.backend.exception.BadRequestException;
@@ -16,6 +17,7 @@ import org.springframework.data.domain.Sort;
 import org.springframework.mail.SimpleMailMessage;
 import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
@@ -33,6 +35,7 @@ public class CustomerService {
     private final CustomerRepository customerRepository;
     private final PasswordEncoder passwordEncoder;
     private final JavaMailSender mailSender;
+    private final BusinessService businessService;
 
     public List<Customer> getAllCustomers(String search, Customer.CustomerStatus status) {
         boolean hasSearch = StringUtils.hasText(search);
@@ -120,6 +123,15 @@ public class CustomerService {
                 ? auth.getDetails().toString()
                 : "Unknown";
 
+        // The company is one of the creator's own businesses, picked by id
+        Business business = null;
+        if (StringUtils.hasText(customerData.getBusinessId()) && auth != null) {
+            business = businessService.getOwnedBusiness(customerData.getBusinessId(), auth.getName());
+        }
+        String company = business != null
+                ? business.getName()
+                : StringUtils.hasText(customerData.getCompany()) ? customerData.getCompany() : customerData.getName();
+
         // Generate a unique userId — if it already exists in users table, keep incrementing
         long userIdCounter = count + 1;
         String userId = "USR-" + String.format("%02d", userIdCounter);
@@ -138,8 +150,8 @@ public class CustomerService {
                         ? customerData.getPhone() : "1234567890")
                 .address(StringUtils.hasText(customerData.getAddress())
                         ? customerData.getAddress() : "Bengaluru, Karnataka, India")
-                .company(StringUtils.hasText(customerData.getCompany())
-                        ? customerData.getCompany() : customerData.getName())
+                .company(company)
+                .businessId(business != null ? business.getId() : null)
                 .gstin(customerData.getGstin() != null
                         ? customerData.getGstin().trim().toUpperCase() : "")
                 .pan(customerData.getPan() != null
@@ -226,7 +238,12 @@ public class CustomerService {
         if (StringUtils.hasText(updatedData.getAddress())) {
             existing.setAddress(updatedData.getAddress().trim());
         }
-        if (StringUtils.hasText(updatedData.getCompany())) {
+        if (StringUtils.hasText(updatedData.getBusinessId())) {
+            Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+            Business business = businessService.getOwnedBusiness(updatedData.getBusinessId(), auth.getName());
+            existing.setBusinessId(business.getId());
+            existing.setCompany(business.getName());
+        } else if (StringUtils.hasText(updatedData.getCompany())) {
             existing.setCompany(updatedData.getCompany().trim());
         }
         if (updatedData.getGstin() != null) {

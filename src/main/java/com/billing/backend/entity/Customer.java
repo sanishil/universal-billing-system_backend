@@ -38,6 +38,10 @@ public class Customer {
     @Column(name = "company", length = 150)
     private String company;
 
+    /** The creator's business this customer is billed from; company holds its name */
+    @Column(name = "business_id", length = 20)
+    private String businessId;
+
     @Column(name = "gstin", length = 15)
     private String gstin;
 
