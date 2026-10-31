@@ -3,6 +3,7 @@ package com.billing.backend.service;
 import com.billing.backend.dto.GstBreakdown;
 import com.billing.backend.entity.Bill;
 import com.billing.backend.entity.BillItem;
+import com.billing.backend.entity.Business;
 import com.billing.backend.entity.Customer;
 import com.billing.backend.exception.BadRequestException;
 import com.billing.backend.exception.ResourceNotFoundException;
@@ -10,7 +11,10 @@ import com.billing.backend.repository.BillRepository;
 import com.billing.backend.util.IndianCurrencyUtil;
 import com.billing.backend.util.TokenGenerator;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.mail.SimpleMailMessage;
+import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -21,6 +25,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class BillService {
@@ -28,9 +33,11 @@ public class BillService {
     private final BillRepository billRepository;
     private final CustomerService customerService;
     private final SettingsService settingsService;
+    private final BusinessService businessService;
     private final GstCalculator gstCalculator;
     private final TokenGenerator tokenGenerator;
     private final IndianCurrencyUtil currencyUtil;
+    private final JavaMailSender mailSender;
 
     // Old share links looked like "bill-<customer>-<6 digits>" and could be guessed
     private static final String LEGACY_LINK_PREFIX = "bill-";
@@ -40,6 +47,13 @@ public class BillService {
 
     @Value("${app.supplier.state-code}")
     private String supplierStateCode;
+
+    @Value("${spring.mail.username}")
+    private String mailFrom;
+
+    // Frontend URL used in the "view bill" link of bill emails
+    @Value("${app.public-base-url}")
+    private String publicBaseUrl;
 
     public List<Bill> getAllBills(String status, String search, String customerId) {
         if (StringUtils.hasText(customerId)) {
@@ -76,7 +90,8 @@ public class BillService {
      *                        false → use the system default rate
      */
     @Transactional
-    public Bill createBill(Bill billData, List<BillItem> items, boolean gstRateProvided) {
+    public Bill createBill(String issuerId, Bill billData, List<BillItem> items, boolean gstRateProvided,
+                           boolean sendEmail, boolean inviteRecipient) {
         if (!StringUtils.hasText(billData.getCustomerId())) {
             throw new BadRequestException("customerId is required");
         }
@@ -89,6 +104,11 @@ public class BillService {
                 gstRateProvided ? billData.getGstRate() : settingsService.getDefaultGstRate());
 
         Customer customer = customerService.getCustomerById(billData.getCustomerId());
+        Business business = sellerBusiness(issuerId, customer);
+        if (sendEmail && !StringUtils.hasText(customer.getEmail())) {
+            throw new BadRequestException("\"" + customer.getName() + "\" has no email address. Add one to the customer or untick \"Email bill to customer\".");
+        }
+        String supplierStateCode = business.getStateCode();
 
         String stateCode = StringUtils.hasText(billData.getStateCode())
                 ? billData.getStateCode().trim()
@@ -123,7 +143,12 @@ public class BillService {
                 .customerId(billData.getCustomerId())
                 .customerName(billData.getCustomerName().trim())
                 .customerGstin(customerGstin != null ? customerGstin.toUpperCase() : null)
-                .supplierGstin(supplierGstin)
+                .issuerId(issuerId)
+                .businessId(business.getId())
+                .supplierName(business.getName())
+                .supplierAddress(business.getAddress())
+                .supplierStateCode(supplierStateCode)
+                .supplierGstin(business.getGstin() != null ? business.getGstin() : "")
                 .pan(pan != null ? pan.toUpperCase() : null)
                 .placeOfSupply(placeOfSupply)
                 .stateCode(stateCode)
@@ -140,6 +165,16 @@ public class BillService {
         Bill savedBill = billRepository.save(bill);
 
         customerService.incrementBillCount(billData.getCustomerId());
+        // Issued as already settled: counts towards the customer's total like mark-paid does
+        if (savedBill.getStatus() == Bill.BillStatus.PAID) {
+            customerService.addToTotalSpent(billData.getCustomerId(), savedBill.getTotal());
+        }
+        if (inviteRecipient) {
+            customerService.giveLogin(billData.getCustomerId());
+        }
+        if (sendEmail) {
+            emailBill(savedBill, customer.getEmail(), business.getName());
+        }
 
         return savedBill;
     }
@@ -178,11 +213,68 @@ public class BillService {
             }
 
             GstBreakdown totals = gstCalculator.calculate(
-                    existing.getItems(), gstRate, supplierStateCode, existing.getStateCode());
+                    existing.getItems(), gstRate,
+                    StringUtils.hasText(existing.getSupplierStateCode()) ? existing.getSupplierStateCode() : supplierStateCode,
+                    existing.getStateCode());
             applyTotals(existing, totals);
         }
 
         return billRepository.save(existing);
+    }
+
+    /** POST /bills/:id/send-email — emails an already issued bill to its customer */
+    public boolean sendBillEmail(String id) {
+        Bill bill = getBillById(id);
+        Customer customer = customerService.getCustomerById(bill.getCustomerId());
+        if (!StringUtils.hasText(customer.getEmail())) {
+            throw new BadRequestException("\"" + customer.getName() + "\" has no email address. Add one to the customer first.");
+        }
+        String sellerName = StringUtils.hasText(bill.getSupplierName()) ? bill.getSupplierName() : "Universal Billing System";
+        return emailBill(bill, customer.getEmail(), sellerName);
+    }
+
+    /** A failed email doesn't undo the bill; it is logged and the bill can be shared by link */
+    private boolean emailBill(Bill bill, String to, String sellerName) {
+        String link = publicBaseUrl + "/bill/view/" + bill.getUniqueLink();
+        SimpleMailMessage message = new SimpleMailMessage();
+        message.setFrom(mailFrom);
+        message.setTo(to);
+        message.setSubject("Invoice " + bill.getId() + " from " + sellerName);
+        message.setText(
+                "Hello " + bill.getCustomerName() + ",\n\n" +
+                sellerName + " has issued you invoice " + bill.getId() + ".\n\n" +
+                "Amount: Rs. " + bill.getTotal().toPlainString() + " (" + bill.getAmountInWords() + ")\n" +
+                "Due date: " + bill.getDueDate() + "\n" +
+                "Status: " + bill.getStatus() + "\n\n" +
+                "View the invoice: " + link + "\n\n" +
+                (StringUtils.hasText(bill.getNotes()) ? bill.getNotes() + "\n\n" : "") +
+                "Regards,\n" + sellerName);
+        try {
+            mailSender.send(message);
+            return true;
+        } catch (Exception e) {
+            log.warn("Email of bill {} to {} failed: {}", bill.getId(), to, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * The business the bill is sold from: the customer's business when it is the issuer's own,
+     * otherwise the issuer's default (first) business.
+     */
+    private Business sellerBusiness(String issuerId, Customer customer) {
+        List<Business> businesses = businessService.getBusinesses(issuerId);
+        Business business = businesses.stream()
+                .filter(b -> b.getId().equals(customer.getBusinessId()))
+                .findFirst()
+                .orElse(businesses.isEmpty() ? null : businesses.get(0));
+        if (business == null) {
+            throw new BadRequestException("Add your business in Profile Settings before issuing bills");
+        }
+        if (!StringUtils.hasText(business.getStateCode())) {
+            throw new BadRequestException("Add the state of \"" + business.getName() + "\" in Profile Settings before issuing bills");
+        }
+        return business;
     }
 
     @Transactional

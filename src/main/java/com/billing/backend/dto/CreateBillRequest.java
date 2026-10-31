@@ -44,6 +44,12 @@ public class CreateBillRequest {
     private LocalDate dueDate;
     private String notes;
 
+    /** Email the bill to the customer after saving */
+    private boolean sendEmail;
+
+    /** Create a login for the customer if they don't have one yet */
+    private boolean inviteRecipient;
+
     // Jackson only calls this when the "gstRate" key is present, even if its value is null
     public void setGstRate(BigDecimal gstRate) {
         this.gstRate = gstRate;

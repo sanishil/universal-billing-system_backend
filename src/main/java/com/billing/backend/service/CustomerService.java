@@ -73,49 +73,53 @@ public class CustomerService {
     }
 
     @Transactional
-    public Customer createCustomer(Customer customerData, String email, String phone) {
-        if (!StringUtils.hasText(customerData.getName())) {
+    public Customer createCustomer(Customer customerData) {
+        boolean giveLogin = Boolean.TRUE.equals(customerData.getInviteRecipient());
+
+        String name = trimToEmpty(customerData.getName());
+        String email = trimToEmpty(customerData.getEmail()).toLowerCase();
+        String phone = normalizePhone(customerData.getPhone());
+        String gstin = trimToEmpty(customerData.getGstin()).toUpperCase();
+        String pan = trimToEmpty(customerData.getPan()).toUpperCase();
+
+        if (name.isEmpty()) {
             throw new BadRequestException("Customer name is required");
         }
-        if (!StringUtils.hasText(customerData.getEmail())) {
-            throw new BadRequestException("Customer email is required");
+        if (giveLogin && email.isEmpty()) {
+            throw new BadRequestException("An email address is needed to give this customer a login");
         }
-
-        if (!customerData.getEmail().matches("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$")) {
+        if (giveLogin && phone.isEmpty()) {
+            throw new BadRequestException("A phone number is needed to give this customer a login");
+        }
+        if (!email.isEmpty() && !email.matches("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$")) {
             throw new BadRequestException("Invalid email format");
         }
-        if (customerRepository.existsByEmail(email)) {
-            throw new ConflictException(
-                    "An account with email \"" + email + "\" already exists.");
+        if (!phone.isEmpty() && !phone.matches("^[6-9][0-9]{9}$")) {
+            throw new BadRequestException("Phone must be a 10-digit Indian mobile number");
         }
-        if (StringUtils.hasText(customerData.getGstin())) {
-            String gstin = customerData.getGstin().trim();
-            if (gstin.length() != 15) {
-                throw new BadRequestException("GSTIN must be exactly 15 characters");
-            }
-            if (!gstin.matches("^[0-3][0-9][A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$")) {
-                throw new BadRequestException("Invalid GSTIN format");
-            }
+        if (!gstin.isEmpty() && !gstin.matches("^[0-3][0-9][A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$")) {
+            throw new BadRequestException("Invalid GSTIN format");
+        }
+        if (!pan.isEmpty() && !pan.matches("^[A-Z]{5}[0-9]{4}[A-Z]$")) {
+            throw new BadRequestException("Invalid PAN format. Expected: AAAAA9999A");
         }
 
-        if (StringUtils.hasText(customerData.getPan())) {
-            String pan = customerData.getPan().trim();
-            if (pan.length() != 10) {
-                throw new BadRequestException("PAN must be exactly 10 characters");
-            }
-            if (!pan.matches("^[A-Z]{5}[0-9]{4}[A-Z]$")) {
-                throw new BadRequestException("Invalid PAN format. Expected: AAAAA9999A");
-            }
+        if (!email.isEmpty() && customerRepository.existsByEmail(email)) {
+            throw new ConflictException("A customer with email \"" + email + "\" already exists.");
         }
-        if (customerRepository.existsByPhone(phone)) {
-            throw new ConflictException(
-                    "An account with phone \"" + phone + "\" already exists.");
+        if (!phone.isEmpty() && customerRepository.existsByPhone(phone)) {
+            throw new ConflictException("A customer with phone \"" + phone + "\" already exists.");
+        }
+        if (giveLogin && userRepository.existsByEmail(email)) {
+            throw new ConflictException("An account with email \"" + email
+                    + "\" already exists. Untick \"Give this customer a login\" to add them as a customer only.");
+        }
+        if (giveLogin && userRepository.existsByPhone(phone)) {
+            throw new ConflictException("An account with phone \"" + phone
+                    + "\" already exists. Untick \"Give this customer a login\" to add them as a customer only.");
         }
 
-        long count = customerRepository.count();
-        String customerId = "CUST-" + String.format("%03d", count + 1);
-
-        // Get the currently logged-in user's name from JWT via SecurityContext
+        // Get the currently logged-in user's id and name from JWT via SecurityContext
         UsernamePasswordAuthenticationToken auth =
                 (UsernamePasswordAuthenticationToken) SecurityContextHolder
                         .getContext().getAuthentication();
@@ -130,7 +134,26 @@ public class CustomerService {
         }
         String company = business != null
                 ? business.getName()
-                : StringUtils.hasText(customerData.getCompany()) ? customerData.getCompany() : customerData.getName();
+                : StringUtils.hasText(customerData.getCompany()) ? customerData.getCompany().trim() : name;
+
+        // Place of supply: the customer's state, else the GSTIN's state, else the business's own state
+        String stateCode = trimToEmpty(customerData.getStateCode());
+        if (stateCode.isEmpty() && !gstin.isEmpty()) {
+            stateCode = gstin.substring(0, 2);
+        }
+        if (stateCode.isEmpty() && business != null && StringUtils.hasText(business.getStateCode())) {
+            stateCode = business.getStateCode();
+        }
+        if (stateCode.isEmpty()) {
+            throw new BadRequestException("Please select the customer's state");
+        }
+
+        long count = customerRepository.count();
+        String customerId = "CUST-" + String.format("%03d", count + 1);
+        while (customerRepository.existsById(customerId)) {
+            count++;
+            customerId = "CUST-" + String.format("%03d", count + 1);
+        }
 
         // Generate a unique userId — if it already exists in users table, keep incrementing
         long userIdCounter = count + 1;
@@ -143,29 +166,73 @@ public class CustomerService {
 //        insert data into customer table
         Customer customer = Customer.builder()
                 .id(customerId)
-                .userid(userId)
-                .name(customerData.getName().trim())
-                .email(customerData.getEmail().trim().toLowerCase())
-                .phone(StringUtils.hasText(customerData.getPhone())
-                        ? customerData.getPhone() : "1234567890")
-                .address(StringUtils.hasText(customerData.getAddress())
-                        ? customerData.getAddress() : "Bengaluru, Karnataka, India")
+                .userid(giveLogin ? userId : "")
+                .name(name)
+                .email(email)
+                .phone(phone)
+                .address(trimToEmpty(customerData.getAddress()))
                 .company(company)
                 .businessId(business != null ? business.getId() : null)
-                .gstin(customerData.getGstin() != null
-                        ? customerData.getGstin().trim().toUpperCase() : "")
-                .pan(customerData.getPan() != null
-                        ? customerData.getPan().trim().toUpperCase() : "")
-                .state(StringUtils.hasText(customerData.getState())
-                        ? customerData.getState() : "Karnataka")
-                .stateCode(StringUtils.hasText(customerData.getStateCode())
-                        ? customerData.getStateCode() : "29")
+                .gstin(gstin)
+                .pan(pan)
+                .state(trimToEmpty(customerData.getState()))
+                .stateCode(stateCode)
                 .totalSpent(BigDecimal.ZERO)
                 .billsCount(0)
                 .status(Customer.CustomerStatus.ACTIVE)
                 .build();
+        customerRepository.save(customer);
 
-// Insert specific data into user table for login
+        if (giveLogin) {
+            createCustomerLogin(customer, userId, loginUserName);
+        }
+        return customer;
+    }
+
+    /**
+     * Gives an existing customer a login (from "Give this customer a login" on a new bill).
+     * Does nothing when they already have one.
+     */
+    @Transactional
+    public void giveLogin(String customerId) {
+        Customer customer = getCustomerById(customerId);
+        if (StringUtils.hasText(customer.getUserid())) {
+            return;
+        }
+        String email = trimToEmpty(customer.getEmail()).toLowerCase();
+        String phone = trimToEmpty(customer.getPhone());
+        if (email.isEmpty()) {
+            throw new BadRequestException("An email address is needed to give this customer a login");
+        }
+        if (phone.isEmpty()) {
+            throw new BadRequestException("A phone number is needed to give this customer a login");
+        }
+        if (userRepository.existsByEmail(email)) {
+            throw new ConflictException("An account with email \"" + email
+                    + "\" already exists. Untick \"Give this customer a login\" to issue the bill only.");
+        }
+        if (userRepository.existsByPhone(phone)) {
+            throw new ConflictException("An account with phone \"" + phone
+                    + "\" already exists. Untick \"Give this customer a login\" to issue the bill only.");
+        }
+
+        long userIdCounter = userRepository.count() + 1;
+        String userId = "USR-" + String.format("%02d", userIdCounter);
+        while (userRepository.existsById(userId)) {
+            userIdCounter++;
+            userId = "USR-" + String.format("%02d", userIdCounter);
+        }
+
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        String createdBy = (auth != null && auth.getDetails() != null) ? auth.getDetails().toString() : "Unknown";
+
+        customer.setUserid(userId);
+        customerRepository.save(customer);
+        createCustomerLogin(customer, userId, createdBy);
+    }
+
+    /** Creates the customer's own login and emails them a temporary password */
+    private void createCustomerLogin(Customer customer, String userId, String createdBy) {
         //      Auto password generating
         String characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
         SecureRandom random = new SecureRandom();
@@ -178,15 +245,22 @@ public class CustomerService {
 
         String password = passwordBuilder.toString();
 
-        String hashedPassword = passwordEncoder.encode(password);
+        // Usernames are unique: rahul, then rahul1, rahul2, ...
+        String baseUsername = customer.getEmail().split("@")[0];
+        if (baseUsername.length() > 45) baseUsername = baseUsername.substring(0, 45);
+        String username = baseUsername;
+        int suffix = 1;
+        while (userRepository.findByUsername(username).isPresent()) {
+            username = baseUsername + suffix++;
+        }
 
         User newUser = User.builder()
                 .id(userId)
-                .name(customerData.getName().trim())
-                .email(customerData.getEmail().trim().toLowerCase())
-                .phone(StringUtils.hasText(customerData.getPhone()) ? customerData.getPhone() : "1234567890")
-                .username(email.split("@")[0])
-                .passwordHash(hashedPassword)
+                .name(customer.getName())
+                .email(customer.getEmail())
+                .phone(customer.getPhone())
+                .username(username)
+                .passwordHash(passwordEncoder.encode(password))
                 .role("Administrator")
                 .status(User.UserStatus.ACTIVE)
                 .loginAttempts(0)
@@ -196,16 +270,15 @@ public class CustomerService {
         SimpleMailMessage message = new SimpleMailMessage();
 
         message.setFrom("sanishil.cse@gmail.com");
-        message.setTo(email);
+        message.setTo(customer.getEmail());
         message.setSubject("Universal Billing System - Account Created");
 
-
         message.setText(
-                "Hello " + customerData.getName().trim() + ",\n\n" +
+                "Hello " + customer.getName() + ",\n\n" +
                         "Your account has been successfully created in the Universal Billing System.\n\n" +
-                        "Created By: " + loginUserName + " for " + customer.getCompany().trim() + "\n\n" +
+                        "Created By: " + createdBy + " for " + customer.getCompany() + "\n\n" +
                         "Login Credentials:\n" +
-                        "Username: " + email + "\n" +
+                        "Username: " + customer.getEmail() + "\n" +
                         "Password: " + password + "\n\n" +
                         "Please log in using the above credentials and verify your account details. " +
                         "For security reasons, we strongly recommend changing your password after your first login.\n\n" +
@@ -213,11 +286,21 @@ public class CustomerService {
                         "Universal Billing System"
         );
 
-
         userRepository.save(newUser);
-        customerRepository.save(customer);
         mailSender.send(message);
-        return customer;
+    }
+
+    private String trimToEmpty(String value) {
+        return value != null ? value.trim() : "";
+    }
+
+    /** Keeps digits only and drops a leading +91 / 91 / 0 */
+    private String normalizePhone(String phone) {
+        if (phone == null) return "";
+        String digits = phone.replaceAll("\\D", "");
+        if (digits.length() == 12 && digits.startsWith("91")) return digits.substring(2);
+        if (digits.length() == 11 && digits.startsWith("0")) return digits.substring(1);
+        return digits;
     }
 
     public Customer updateCustomer(String id, Customer updatedData) {

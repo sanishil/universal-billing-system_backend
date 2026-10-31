@@ -7,6 +7,7 @@ import com.billing.backend.service.BillService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.security.core.Authentication;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -68,7 +69,9 @@ public class BillController {
      * @Valid triggers validation on CreateBillRequest + nested BillItemDto.
      */
     @PostMapping
-    public ResponseEntity<Bill> createBill(@Valid @RequestBody CreateBillRequest request) {
+    public ResponseEntity<Bill> createBill(
+            Authentication authentication,
+            @Valid @RequestBody CreateBillRequest request) {
         // Map DTO → entity objects for the service layer
         Bill billData = Bill.builder()
                 .customerId(request.getCustomerId())
@@ -98,7 +101,8 @@ public class BillController {
                         .build())
                 .collect(Collectors.toList());
 
-        Bill created = billService.createBill(billData, items, request.isGstRateProvided());
+        Bill created = billService.createBill(authentication.getName(), billData, items, request.isGstRateProvided(),
+                request.isSendEmail(), request.isInviteRecipient());
         return ResponseEntity.status(HttpStatus.CREATED).body(created);
     }
 
@@ -147,6 +151,13 @@ public class BillController {
     @PatchMapping("/{id}/mark-paid")
     public ResponseEntity<Bill> markPaid(@PathVariable String id) {
         return ResponseEntity.ok(billService.markAsPaid(id));
+    }
+
+    // ── POST /api/bills/:id/send-email ─────────────────────────────────────────
+    @PostMapping("/{id}/send-email")
+    public ResponseEntity<Map<String, Object>> sendEmail(@PathVariable String id) {
+        boolean sent = billService.sendBillEmail(id);
+        return ResponseEntity.ok(Map.of("status", sent ? "SENT" : "FAILED"));
     }
 
     // ── POST /api/bills/generate-link ─────────────────────────────────────────

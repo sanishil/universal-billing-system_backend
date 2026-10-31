@@ -1,5 +1,6 @@
 package com.billing.backend.entity;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.persistence.*;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -42,8 +43,19 @@ public class Customer {
     @Column(name = "business_id", length = 20)
     private String businessId;
 
+    /** Request-only flag from the create form: also create a login for this customer */
+    @Transient
+    @JsonProperty(access = JsonProperty.Access.WRITE_ONLY)
+    private Boolean inviteRecipient;
+
     @Column(name = "gstin", length = 15)
     private String gstin;
+
+    /** REGISTERED when the customer has a login of their own, else NONE */
+    @JsonProperty(value = "accountStatus", access = JsonProperty.Access.READ_ONLY)
+    public String getAccountStatus() {
+        return userid != null && !userid.isBlank() ? "REGISTERED" : "NONE";
+    }
 
     @Column(name = "pan", length = 10)
     private String pan;

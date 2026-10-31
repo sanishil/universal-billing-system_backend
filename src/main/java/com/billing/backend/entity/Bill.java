@@ -37,6 +37,24 @@ public class Bill {
     @Builder.Default
     private String supplierGstin = "29AABCU9603R1ZM";
 
+    /** The logged-in user who issued this bill */
+    @Column(name = "issuer_id", length = 20)
+    private String issuerId;
+
+    /** The issuer's business this bill is sold from; supplier_* is a snapshot of it */
+    @Column(name = "business_id", length = 20)
+    private String businessId;
+
+    @Column(name = "supplier_name", length = 150)
+    private String supplierName;
+
+    @Column(name = "supplier_address", columnDefinition = "TEXT")
+    private String supplierAddress;
+
+    /** Decides CGST + SGST (same state as place of supply) vs IGST */
+    @Column(name = "supplier_state_code", length = 5)
+    private String supplierStateCode;
+
     @Column(name = "pan", length = 10)
     private String pan;
 

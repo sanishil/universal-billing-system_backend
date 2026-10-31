@@ -63,7 +63,7 @@ public class CustomerController {
     // ── POST /api/customers ────────────────────────────────────────────────────
     @PostMapping
     public ResponseEntity<Customer> createCustomer(@RequestBody Customer customerData) {
-        Customer created = customerService.createCustomer(customerData, customerData.getEmail(), customerData.getPhone());
+        Customer created = customerService.createCustomer(customerData);
         return ResponseEntity.status(HttpStatus.CREATED).body(created);
     }
 
