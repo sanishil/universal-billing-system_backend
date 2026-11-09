@@ -41,6 +41,8 @@ public class InvoicePdfService {
         doc.open();
 
         boolean gst = bill.getGstRate() != null;
+        // HSN/SAC codes only matter when GST is charged; left out for No GST and 0%
+        boolean showHsn = gst && bill.getGstRate().signum() != 0;
 
         // Header: seller on the left, invoice number and dates on the right
         PdfPTable header = new PdfPTable(new float[]{3, 2});
@@ -77,9 +79,14 @@ public class InvoicePdfService {
         doc.add(spacer());
 
         // Items
-        PdfPTable items = new PdfPTable(new float[]{0.5f, 4, 1.4f, 1, 1.6f, 1.8f});
+        PdfPTable items = showHsn
+                ? new PdfPTable(new float[]{0.5f, 4, 1.4f, 1, 1.6f, 1.8f})
+                : new PdfPTable(new float[]{0.5f, 5.4f, 1, 1.6f, 1.8f});
         items.setWidthPercentage(100);
-        for (String h : new String[]{"#", "Description", "HSN/SAC", "Qty", "Rate", "Amount"}) {
+        String[] headers = showHsn
+                ? new String[]{"#", "Description", "HSN/SAC", "Qty", "Rate", "Amount"}
+                : new String[]{"#", "Description", "Qty", "Rate", "Amount"};
+        for (String h : headers) {
             PdfPCell c = new PdfPCell(new Phrase(h, whiteBold));
             c.setBackgroundColor(BRAND);
             c.setPadding(5);
@@ -91,7 +98,7 @@ public class InvoicePdfService {
         for (BillItem item : bill.getItems()) {
             items.addCell(row(String.valueOf(n++), true));
             items.addCell(row(item.getName(), false));
-            items.addCell(row(orDash(item.getHsnSac()), true));
+            if (showHsn) items.addCell(row(orDash(item.getHsnSac()), true));
             items.addCell(row(plain(item.getQuantity()), true));
             items.addCell(row(money(item.getPrice()), true));
             items.addCell(row(money(item.getAmount()), true));
