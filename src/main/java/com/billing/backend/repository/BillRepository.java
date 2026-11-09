@@ -14,6 +14,14 @@ import java.util.Optional;
 @Repository
 public interface BillRepository extends JpaRepository<Bill, String> {
 
+    /** Bills the user issued (the Sent tab) */
+    List<Bill> findByIssuerIdOrderByCreatedAtDesc(String issuerId);
+
+    /** Bills issued to customers that are linked to this user's login (the Received tab) */
+    @Query("SELECT b FROM Bill b WHERE b.customerId IN " +
+           "(SELECT c.id FROM Customer c WHERE c.userid = :userId) ORDER BY b.createdAt DESC")
+    List<Bill> findReceivedBy(@Param("userId") String userId);
+
     Optional<Bill> findByUniqueLink(String uniqueLink);
 
     List<Bill> findByStatus(Bill.BillStatus status);

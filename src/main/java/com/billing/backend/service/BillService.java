@@ -2,11 +2,13 @@ package com.billing.backend.service;
 
 import com.billing.backend.dto.GstBreakdown;
 import com.billing.backend.entity.Bill;
+import com.billing.backend.entity.BillEmailLog;
 import com.billing.backend.entity.BillItem;
 import com.billing.backend.entity.Business;
 import com.billing.backend.entity.Customer;
 import com.billing.backend.exception.BadRequestException;
 import com.billing.backend.exception.ResourceNotFoundException;
+import com.billing.backend.repository.BillEmailLogRepository;
 import com.billing.backend.repository.BillRepository;
 import com.billing.backend.util.IndianCurrencyUtil;
 import com.billing.backend.util.TokenGenerator;
@@ -21,8 +23,12 @@ import org.springframework.util.StringUtils;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -38,6 +44,7 @@ public class BillService {
     private final TokenGenerator tokenGenerator;
     private final IndianCurrencyUtil currencyUtil;
     private final JavaMailSender mailSender;
+    private final BillEmailLogRepository emailLogRepository;
 
     // Old share links looked like "bill-<customer>-<6 digits>" and could be guessed
     private static final String LEGACY_LINK_PREFIX = "bill-";
@@ -55,29 +62,89 @@ public class BillService {
     @Value("${app.public-base-url}")
     private String publicBaseUrl;
 
-    public List<Bill> getAllBills(String status, String search, String customerId) {
-        if (StringUtils.hasText(customerId)) {
-            return billRepository.findByCustomerId(customerId);
-        }
+    public static final String ISSUER = "ISSUER";
+    public static final String RECIPIENT = "RECIPIENT";
 
-        boolean hasSearch = StringUtils.hasText(search);
+    /**
+     * scope=sent (default): bills the user issued. scope=received: bills issued to a customer
+     * record linked to the user's login. Then filtered by status / search / customerId.
+     */
+    public List<Bill> getBills(String userId, String scope, String status, String search, String customerId) {
+        boolean received = "received".equalsIgnoreCase(scope);
+        List<Bill> bills = received
+                ? billRepository.findReceivedBy(userId)
+                : billRepository.findByIssuerIdOrderByCreatedAtDesc(userId);
+
         boolean hasStatus = StringUtils.hasText(status) && !status.equalsIgnoreCase("ALL");
+        Bill.BillStatus billStatus = hasStatus && !status.equalsIgnoreCase("UNPAID") ? parseBillStatus(status) : null;
+        String term = StringUtils.hasText(search) ? search.trim().toLowerCase() : null;
 
-        if (hasSearch && hasStatus) {
-            Bill.BillStatus billStatus = parseBillStatus(status);
-            return billRepository.searchByIdOrCustomerNameAndStatus(search, billStatus);
-        } else if (hasSearch) {
-            return billRepository.searchByIdOrCustomerName(search);
-        } else if (hasStatus) {
-            return billRepository.findByStatus(parseBillStatus(status));
-        } else {
-            return billRepository.findAll();
-        }
+        return bills.stream()
+                .filter(b -> !StringUtils.hasText(customerId) || customerId.equals(b.getCustomerId()))
+                .filter(b -> !hasStatus
+                        || (billStatus != null ? b.getStatus() == billStatus : b.getStatus() != Bill.BillStatus.PAID))
+                .filter(b -> term == null
+                        || b.getId().toLowerCase().contains(term)
+                        || b.getCustomerName().toLowerCase().contains(term)
+                        || (b.getSupplierName() != null && b.getSupplierName().toLowerCase().contains(term)))
+                .sorted(Comparator.comparing(Bill::getCreatedAt, Comparator.nullsLast(Comparator.reverseOrder())))
+                .map(b -> decorate(b, received ? RECIPIENT : ISSUER))
+                .toList();
+    }
+
+    /** Throws 404 unless the user issued the bill or it was issued to them */
+    public Bill getBillForUser(String id, String userId) {
+        Bill bill = getBillById(id);
+        return decorate(bill, roleOf(bill, userId));
     }
 
     public Bill getBillById(String id) {
         return billRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Bill", id));
+    }
+
+    /** Changes (edit, delete, email, share) are for the issuer only */
+    private Bill getOwnBill(String id, String userId) {
+        Bill bill = getBillById(id);
+        if (!ISSUER.equals(roleOf(bill, userId))) {
+            throw new ResourceNotFoundException("Bill", id);
+        }
+        return bill;
+    }
+
+    private String roleOf(Bill bill, String userId) {
+        // Bills from before issuers were recorded belong to whoever can see them
+        if (bill.getIssuerId() == null || bill.getIssuerId().equals(userId)) {
+            return ISSUER;
+        }
+        boolean isRecipient = customerService.findByUserid(userId).stream()
+                .anyMatch(c -> c.getId().equals(bill.getCustomerId()));
+        if (isRecipient) {
+            return RECIPIENT;
+        }
+        throw new ResourceNotFoundException("Bill", bill.getId());
+    }
+
+    /** Fills the response-only fields */
+    public Bill decorate(Bill bill, String role) {
+        bill.setMyRole(role);
+        bill.setPublicUrl(publicUrl(bill));
+        emailLogRepository.findFirstByBillIdOrderByCreatedAtDesc(bill.getId())
+                .ifPresent(log -> bill.setLastEmailStatus(log.getStatus()));
+
+        Map<String, Object> issuer = new LinkedHashMap<>();
+        issuer.put("id", bill.getIssuerId());
+        issuer.put("name", bill.getSupplierName());
+        issuer.put("businessName", bill.getSupplierName());
+        issuer.put("gstin", StringUtils.hasText(bill.getSupplierGstin()) ? bill.getSupplierGstin() : null);
+        issuer.put("stateCode", StringUtils.hasText(bill.getSupplierStateCode()) ? bill.getSupplierStateCode() : supplierStateCode);
+        issuer.put("address", bill.getSupplierAddress());
+        bill.setIssuer(StringUtils.hasText(bill.getSupplierName()) ? issuer : null);
+        return bill;
+    }
+
+    private String publicUrl(Bill bill) {
+        return publicBaseUrl + "/bill/view/" + bill.getUniqueLink();
     }
 
     public Bill getBillByUniqueLink(String uniqueLink) {
@@ -130,10 +197,8 @@ public class BillService {
                 ? billData.getDueDate()
                 : LocalDate.now().plusDays(14);
 
-        String notes = StringUtils.hasText(billData.getNotes())
-                ? billData.getNotes()
-                : "Thank you for choosing Universal Billing System. " +
-                  "Payment via UPI or Net Banking appreciated.";
+        // No notes means none on the invoice; no default text is added
+        String notes = StringUtils.hasText(billData.getNotes()) ? billData.getNotes().trim() : null;
 
         String pan = firstNonBlank(billData.getPan(), customer.getPan());
         String customerGstin = firstNonBlank(billData.getCustomerGstin(), customer.getGstin());
@@ -173,10 +238,11 @@ public class BillService {
             customerService.giveLogin(billData.getCustomerId());
         }
         if (sendEmail) {
-            emailBill(savedBill, customer.getEmail(), business.getName());
+            emailBill(savedBill, customer.getEmail(), null, null, business.getName(),
+                    inviteRecipient ? "BILL_WITH_INVITE" : "BILL");
         }
 
-        return savedBill;
+        return decorate(savedBill, ISSUER);
     }
 
     /**
@@ -184,8 +250,10 @@ public class BillService {
      *                        false → keep the bill's current rate
      */
     @Transactional
-    public Bill updateBill(String id, Bill updatedData, List<BillItem> newItems, boolean gstRateProvided) {
-        Bill existing = getBillById(id);
+    public Bill updateBill(String id, String userId, Bill updatedData, List<BillItem> newItems, boolean gstRateProvided) {
+        Bill existing = getOwnBill(id, userId);
+        boolean wasPaid = existing.getStatus() == Bill.BillStatus.PAID;
+        BigDecimal oldTotal = existing.getTotal();
 
         if (StringUtils.hasText(updatedData.getCustomerName())) {
             existing.setCustomerName(updatedData.getCustomerName().trim());
@@ -219,43 +287,71 @@ public class BillService {
             applyTotals(existing, totals);
         }
 
-        return billRepository.save(existing);
+        Bill saved = billRepository.save(existing);
+
+        // Paid bills count towards the customer's total; move it when status or amount changes
+        boolean isPaid = saved.getStatus() == Bill.BillStatus.PAID;
+        if (wasPaid) customerService.addToTotalSpent(saved.getCustomerId(), oldTotal.negate());
+        if (isPaid) customerService.addToTotalSpent(saved.getCustomerId(), saved.getTotal());
+
+        return decorate(saved, ISSUER);
     }
 
-    /** POST /bills/:id/send-email — emails an already issued bill to its customer */
-    public boolean sendBillEmail(String id) {
-        Bill bill = getBillById(id);
-        Customer customer = customerService.getCustomerById(bill.getCustomerId());
-        if (!StringUtils.hasText(customer.getEmail())) {
-            throw new BadRequestException("\"" + customer.getName() + "\" has no email address. Add one to the customer first.");
+    /** POST /bills/:id/send-email — to defaults to the customer's email */
+    public BillEmailLog sendBillEmail(String id, String userId, String to, List<String> cc, String message) {
+        Bill bill = getOwnBill(id, userId);
+        String recipient = to;
+        if (!StringUtils.hasText(recipient)) {
+            Customer customer = customerService.getCustomerById(bill.getCustomerId());
+            recipient = customer.getEmail();
+            if (!StringUtils.hasText(recipient)) {
+                throw new BadRequestException("\"" + customer.getName() + "\" has no email address. Enter one to send the bill to.");
+            }
+        }
+        if (!recipient.trim().matches("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$")) {
+            throw new BadRequestException("Invalid email address: " + recipient);
         }
         String sellerName = StringUtils.hasText(bill.getSupplierName()) ? bill.getSupplierName() : "Universal Billing System";
-        return emailBill(bill, customer.getEmail(), sellerName);
+        return emailBill(bill, recipient.trim(), cc, message, sellerName, "BILL");
+    }
+
+    public List<BillEmailLog> getEmailLogs(String id, String userId) {
+        getOwnBill(id, userId);
+        return emailLogRepository.findByBillIdOrderByCreatedAtDesc(id);
     }
 
     /** A failed email doesn't undo the bill; it is logged and the bill can be shared by link */
-    private boolean emailBill(Bill bill, String to, String sellerName) {
-        String link = publicBaseUrl + "/bill/view/" + bill.getUniqueLink();
+    private BillEmailLog emailBill(Bill bill, String to, List<String> cc, String extraMessage,
+                                  String sellerName, String type) {
         SimpleMailMessage message = new SimpleMailMessage();
         message.setFrom(mailFrom);
         message.setTo(to);
+        if (cc != null && !cc.isEmpty()) {
+            message.setCc(cc.stream().filter(StringUtils::hasText).map(String::trim).toArray(String[]::new));
+        }
         message.setSubject("Invoice " + bill.getId() + " from " + sellerName);
         message.setText(
                 "Hello " + bill.getCustomerName() + ",\n\n" +
+                (StringUtils.hasText(extraMessage) ? extraMessage.trim() + "\n\n" : "") +
                 sellerName + " has issued you invoice " + bill.getId() + ".\n\n" +
                 "Amount: Rs. " + bill.getTotal().toPlainString() + " (" + bill.getAmountInWords() + ")\n" +
                 "Due date: " + bill.getDueDate() + "\n" +
                 "Status: " + bill.getStatus() + "\n\n" +
-                "View the invoice: " + link + "\n\n" +
+                "View or download the invoice: " + publicUrl(bill) + "\n\n" +
                 (StringUtils.hasText(bill.getNotes()) ? bill.getNotes() + "\n\n" : "") +
                 "Regards,\n" + sellerName);
+
+        BillEmailLog log = BillEmailLog.builder().billId(bill.getId()).toEmail(to).type(type).build();
         try {
             mailSender.send(message);
-            return true;
+            log.setStatus("SENT");
+            log.setSentAt(LocalDateTime.now());
         } catch (Exception e) {
-            log.warn("Email of bill {} to {} failed: {}", bill.getId(), to, e.getMessage());
-            return false;
+            BillService.log.warn("Email of bill {} to {} failed: {}", bill.getId(), to, e.getMessage());
+            log.setStatus("FAILED");
+            log.setError(e.getMessage());
         }
+        return emailLogRepository.save(log);
     }
 
     /**
@@ -278,12 +374,13 @@ public class BillService {
     }
 
     @Transactional
-    public void deleteBill(String id) {
-        Bill bill = getBillById(id);
+    public void deleteBill(String id, String userId) {
+        Bill bill = getOwnBill(id, userId);
         String customerId = bill.getCustomerId();
         boolean wasPaid = bill.getStatus() == Bill.BillStatus.PAID;
         BigDecimal paidAmount = bill.getTotal();
 
+        emailLogRepository.deleteByBillId(bill.getId());
         billRepository.delete(bill);
 
         customerService.decrementBillCount(customerId);
@@ -293,8 +390,9 @@ public class BillService {
     }
 
     @Transactional
-    public Bill markAsPaid(String id) {
+    public Bill markAsPaid(String id, String userId) {
         Bill bill = getBillById(id);
+        String role = roleOf(bill, userId);
 
         if (bill.getStatus() == Bill.BillStatus.PAID) {
             throw new BadRequestException("Bill is already marked as PAID");
@@ -305,37 +403,38 @@ public class BillService {
 
         customerService.addToTotalSpent(bill.getCustomerId(), bill.getTotal());
 
-        return savedBill;
+        return decorate(savedBill, role);
     }
 
-    public java.util.Map<String, Object> getBillStats() {
-        BigDecimal totalRevenue = billRepository.getTotalRevenue();
-        long paidCount = billRepository.countByStatus(Bill.BillStatus.PAID);
-        long pendingCount = billRepository.countByStatus(Bill.BillStatus.PENDING);
-        long overdueCount = billRepository.countByStatus(Bill.BillStatus.OVERDUE);
-        long totalCount = billRepository.count();
+    /** Counts and settled revenue of the same bills the list shows for this scope */
+    public Map<String, Object> getBillStats(String userId, String scope) {
+        List<Bill> bills = getBills(userId, scope, null, null, null);
+        BigDecimal totalRevenue = bills.stream()
+                .filter(b -> b.getStatus() == Bill.BillStatus.PAID)
+                .map(Bill::getTotal)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-        return java.util.Map.of(
-                "totalRevenue", totalRevenue,
-                "paidCount", paidCount,
-                "pendingCount", pendingCount,
-                "overdueCount", overdueCount,
-                "totalCount", totalCount
-        );
+        Map<String, Object> stats = new LinkedHashMap<>();
+        stats.put("totalRevenue", totalRevenue);
+        stats.put("paidCount", bills.stream().filter(b -> b.getStatus() == Bill.BillStatus.PAID).count());
+        stats.put("pendingCount", bills.stream().filter(b -> b.getStatus() == Bill.BillStatus.PENDING).count());
+        stats.put("overdueCount", bills.stream().filter(b -> b.getStatus() == Bill.BillStatus.OVERDUE).count());
+        stats.put("totalCount", bills.size());
+        return stats;
     }
 
     /**
-     * Returns the absolute public URL. Bills that still have an old guessable link
-     * get a new random token, so the old link stops working.
+     * The bill's public link. regenerate=true makes a new random token so old copies stop working;
+     * bills with an old guessable link always get a new one.
      */
     @Transactional
-    public String generateShareLink(String billId, String publicBaseUrl) {
-        Bill bill = getBillById(billId);
-        if (bill.getUniqueLink() == null || bill.getUniqueLink().startsWith(LEGACY_LINK_PREFIX)) {
+    public String shareLink(String billId, String userId, boolean regenerate) {
+        Bill bill = getOwnBill(billId, userId);
+        if (regenerate || bill.getUniqueLink() == null || bill.getUniqueLink().startsWith(LEGACY_LINK_PREFIX)) {
             bill.setUniqueLink(newUniqueLink());
             billRepository.save(bill);
         }
-        return publicBaseUrl + "/bill/view/" + bill.getUniqueLink();
+        return publicUrl(bill);
     }
 
     @Transactional

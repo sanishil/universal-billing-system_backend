@@ -125,6 +125,24 @@ public class Bill {
     @Column(name = "notes", columnDefinition = "TEXT")
     private String notes;
 
+    // ── Response-only fields, filled per request by BillService ───────────────
+
+    /** ISSUER when the logged-in user issued the bill, RECIPIENT when it was issued to them */
+    @Transient
+    private String myRole;
+
+    /** The seller: business name, GSTIN, state and address as they were on the bill */
+    @Transient
+    private java.util.Map<String, Object> issuer;
+
+    /** Absolute public link anyone can open without logging in */
+    @Transient
+    private String publicUrl;
+
+    /** SENT / FAILED of the latest email of this bill; null when never emailed */
+    @Transient
+    private String lastEmailStatus;
+
     @JsonProperty("gstApplicable")
     public boolean isGstApplicable() {
         return gstRate != null;

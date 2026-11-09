@@ -354,6 +354,11 @@ public class CustomerService {
         customerRepository.save(customer);
     }
 
+    /** Customer records linked to this login (bills issued to them show under Received) */
+    public List<Customer> findByUserid(String userId) {
+        return customerRepository.findByUserid(userId);
+    }
+
     public void incrementBillCount(String customerId) {
         Customer customer = getCustomerById(customerId);
         customer.setBillsCount(customer.getBillsCount() + 1);
