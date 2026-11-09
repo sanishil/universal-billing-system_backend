@@ -23,6 +23,10 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import java.math.BigDecimal;
+import java.util.Optional;
+import java.util.Map;
+import java.util.LinkedHashMap;
+import org.springframework.data.domain.PageImpl;
 import java.security.SecureRandom;
 import java.util.List;
 
@@ -37,39 +41,73 @@ public class CustomerService {
     private final JavaMailSender mailSender;
     private final BusinessService businessService;
 
-    public List<Customer> getAllCustomers(String search, Customer.CustomerStatus status) {
-        boolean hasSearch = StringUtils.hasText(search);
-        boolean hasStatus = status != null;
-
-        if (hasSearch && hasStatus) {
-            return customerRepository.searchByNameOrEmailAndStatus(search, status);
-        } else if (hasSearch) {
-            return customerRepository.searchByNameOrEmail(search);
-        } else if (hasStatus) {
-            return customerRepository.findByStatus(status);
-        } else {
-            return customerRepository.findAll();
-        }
-    }
-
     public Customer getCustomerById(String id) {
         return customerRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Customer", id));
     }
 
-    public Page<Customer> getCustomers(String search, Customer.CustomerStatus status, int page, int size) {
+    /** Throws 404 unless the user added this customer (customers from before owners were recorded are open) */
+    public Customer getOwnCustomer(String id, String userId) {
+        Customer customer = getCustomerById(id);
+        if (customer.getOwnerId() != null && !customer.getOwnerId().equals(userId)) {
+            throw new ResourceNotFoundException("Customer", id);
+        }
+        return customer;
+    }
+
+    /** The user's own customers, filtered and paged */
+    public Page<Customer> getCustomers(String userId, String search, Customer.CustomerStatus status, int page, int size) {
         int safePage = Math.max(page, 0);
         int safeSize = (size < 1 || size > 100) ? 10 : size;
-        Pageable pageable = PageRequest.of(safePage, safeSize, Sort.by(Sort.Direction.DESC, "createdAt"));
+        String term = StringUtils.hasText(search) ? search.trim().toLowerCase() : null;
 
-        if (StringUtils.hasText(search) && status != null) {
-            return customerRepository.searchByNameOrEmailAndStatus(search.trim(), status, pageable);
-        } else if (StringUtils.hasText(search)) {
-            return customerRepository.searchByNameOrEmail(search.trim(), pageable);
-        } else if (status != null) {
-            return customerRepository.findByStatus(status, pageable);
+        List<Customer> matches = customerRepository.findByOwnerIdOrderByCreatedAtDesc(userId).stream()
+                .filter(c -> status == null || c.getStatus() == status)
+                .filter(c -> term == null
+                        || c.getName().toLowerCase().contains(term)
+                        || (c.getEmail() != null && c.getEmail().toLowerCase().contains(term))
+                        || (c.getPhone() != null && c.getPhone().contains(term))
+                        || (c.getCompany() != null && c.getCompany().toLowerCase().contains(term)))
+                .toList();
+
+        int from = Math.min(safePage * safeSize, matches.size());
+        int to = Math.min(from + safeSize, matches.size());
+        return new PageImpl<>(matches.subList(from, to), PageRequest.of(safePage, safeSize), matches.size());
+    }
+
+    /**
+     * GET /customers/lookup?email= — what Add Customer should say about this email:
+     *   MINE   → already in your customer list
+     *   EXISTS → someone else added them, or they have their own account; only their name is shared
+     *   NEW    → not in the system
+     */
+    public Map<String, Object> lookupByEmail(String userId, String rawEmail) {
+        String email = trimToEmpty(rawEmail).toLowerCase();
+        Map<String, Object> result = new LinkedHashMap<>();
+        if (email.isEmpty()) {
+            result.put("status", "NEW");
+            return result;
         }
-        return customerRepository.findAll(pageable);
+
+        Optional<Customer> mine = customerRepository.findFirstByOwnerIdAndEmailIgnoreCase(userId, email);
+        if (mine.isPresent()) {
+            result.put("status", "MINE");
+            result.put("customerId", mine.get().getId());
+            result.put("name", mine.get().getName());
+            return result;
+        }
+
+        Optional<User> account = userRepository.findByEmailIgnoreCase(email);
+        List<Customer> elsewhere = customerRepository.findByEmailIgnoreCaseOrderByCreatedAtAsc(email);
+        if (account.isPresent() || !elsewhere.isEmpty()) {
+            result.put("status", "EXISTS");
+            result.put("name", account.map(User::getName).orElse(elsewhere.isEmpty() ? null : elsewhere.get(0).getName()));
+            result.put("hasAccount", account.isPresent());
+            return result;
+        }
+
+        result.put("status", "NEW");
+        return result;
     }
 
     @Transactional
@@ -104,25 +142,27 @@ public class CustomerService {
             throw new BadRequestException("Invalid PAN format. Expected: AAAAA9999A");
         }
 
-        if (!email.isEmpty() && customerRepository.existsByEmail(email)) {
-            throw new ConflictException("A customer with email \"" + email + "\" already exists.");
-        }
-        if (!phone.isEmpty() && customerRepository.existsByPhone(phone)) {
-            throw new ConflictException("A customer with phone \"" + phone + "\" already exists.");
-        }
-        if (giveLogin && userRepository.existsByEmail(email)) {
-            throw new ConflictException("An account with email \"" + email
-                    + "\" already exists. Untick \"Give this customer a login\" to add them as a customer only.");
-        }
-        if (giveLogin && userRepository.existsByPhone(phone)) {
-            throw new ConflictException("An account with phone \"" + phone
-                    + "\" already exists. Untick \"Give this customer a login\" to add them as a customer only.");
-        }
-
         // Get the currently logged-in user's id and name from JWT via SecurityContext
         UsernamePasswordAuthenticationToken auth =
                 (UsernamePasswordAuthenticationToken) SecurityContextHolder
                         .getContext().getAuthentication();
+        String ownerId = auth != null ? auth.getName() : null;
+
+        // Duplicates are only checked within your own list; other users may have the same customer
+        if (!email.isEmpty() && customerRepository.existsByOwnerIdAndEmailIgnoreCase(ownerId, email)) {
+            throw new ConflictException("\"" + email + "\" is already in your customers.");
+        }
+        if (!phone.isEmpty() && customerRepository.existsByOwnerIdAndPhone(ownerId, phone)) {
+            throw new ConflictException("A customer with phone \"" + phone + "\" is already in your customers.");
+        }
+
+        // Someone who already has an account is linked to it instead of getting a second login
+        Optional<User> existingAccount = email.isEmpty() ? Optional.empty() : userRepository.findByEmailIgnoreCase(email);
+        if (existingAccount.isEmpty() && giveLogin && userRepository.existsByPhone(phone)) {
+            throw new ConflictException("An account with phone \"" + phone
+                    + "\" already exists. Untick \"Give this customer a login\" to add them as a customer only.");
+        }
+        boolean createLogin = giveLogin && existingAccount.isEmpty();
         String loginUserName = (auth != null && auth.getDetails() != null)
                 ? auth.getDetails().toString()
                 : "Unknown";
@@ -166,7 +206,8 @@ public class CustomerService {
 //        insert data into customer table
         Customer customer = Customer.builder()
                 .id(customerId)
-                .userid(giveLogin ? userId : "")
+                .userid(existingAccount.map(User::getId).orElse(createLogin ? userId : ""))
+                .ownerId(ownerId)
                 .name(name)
                 .email(email)
                 .phone(phone)
@@ -183,7 +224,7 @@ public class CustomerService {
                 .build();
         customerRepository.save(customer);
 
-        if (giveLogin) {
+        if (createLogin) {
             createCustomerLogin(customer, userId, loginUserName);
         }
         return customer;
@@ -207,9 +248,11 @@ public class CustomerService {
         if (phone.isEmpty()) {
             throw new BadRequestException("A phone number is needed to give this customer a login");
         }
-        if (userRepository.existsByEmail(email)) {
-            throw new ConflictException("An account with email \"" + email
-                    + "\" already exists. Untick \"Give this customer a login\" to issue the bill only.");
+        Optional<User> existingAccount = userRepository.findByEmailIgnoreCase(email);
+        if (existingAccount.isPresent()) {
+            customer.setUserid(existingAccount.get().getId());
+            customerRepository.save(customer);
+            return;
         }
         if (userRepository.existsByPhone(phone)) {
             throw new ConflictException("An account with phone \"" + phone
@@ -303,8 +346,8 @@ public class CustomerService {
         return digits;
     }
 
-    public Customer updateCustomer(String id, Customer updatedData) {
-        Customer existing = getCustomerById(id);
+    public Customer updateCustomer(String id, String userId, Customer updatedData) {
+        Customer existing = getOwnCustomer(id, userId);
 
         if (StringUtils.hasText(updatedData.getName())) {
             existing.setName(updatedData.getName().trim());
@@ -313,7 +356,12 @@ public class CustomerService {
             if (!updatedData.getEmail().matches("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$")) {
                 throw new BadRequestException("Invalid email format");
             }
-            existing.setEmail(updatedData.getEmail().trim().toLowerCase());
+            String newEmail = updatedData.getEmail().trim().toLowerCase();
+            if (!newEmail.equalsIgnoreCase(existing.getEmail())
+                    && customerRepository.existsByOwnerIdAndEmailIgnoreCase(userId, newEmail)) {
+                throw new ConflictException("\"" + newEmail + "\" is already in your customers.");
+            }
+            existing.setEmail(newEmail);
         }
         if (StringUtils.hasText(updatedData.getPhone())) {
             existing.setPhone(updatedData.getPhone().trim());
@@ -348,8 +396,8 @@ public class CustomerService {
         return customerRepository.save(existing);
     }
 
-    public void deleteCustomer(String id) {
-        Customer customer = getCustomerById(id);
+    public void deleteCustomer(String id, String userId) {
+        Customer customer = getOwnCustomer(id, userId);
         customer.setStatus(Customer.CustomerStatus.INACTIVE);
         customerRepository.save(customer);
     }

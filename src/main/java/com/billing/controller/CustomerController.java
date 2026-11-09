@@ -5,6 +5,7 @@ import com.billing.backend.service.CustomerService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.core.Authentication;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -36,6 +37,7 @@ public class CustomerController {
      */
     @GetMapping
     public ResponseEntity<Page<Customer>> getCustomers(
+            Authentication authentication,
             @RequestParam(required = false) String search,
             @RequestParam(required = false) String status,
             @RequestParam(defaultValue = "0") int page,
@@ -48,16 +50,23 @@ public class CustomerController {
             } catch (IllegalArgumentException ignored) {}
         }
 
-        return ResponseEntity.ok(customerService.getCustomers(search, statusEnum, page, size));
+        return ResponseEntity.ok(customerService.getCustomers(authentication.getName(), search, statusEnum, page, size));
     }
 
     // ── GET /api/customers/:id ─────────────────────────────────────────────────
     /**
      * @PathVariable → extracts "id" from the URL path, e.g. /api/customers/CUST-001
      */
+    // ── GET /api/customers/lookup?email= ──────────────────────────────────────
+    // Must come before /{id}. Tells Add Customer whether this email is new, yours, or known elsewhere.
+    @GetMapping("/lookup")
+    public ResponseEntity<Map<String, Object>> lookup(Authentication authentication, @RequestParam String email) {
+        return ResponseEntity.ok(customerService.lookupByEmail(authentication.getName(), email));
+    }
+
     @GetMapping("/{id}")
-    public ResponseEntity<Customer> getCustomerById(@PathVariable String id) {
-        return ResponseEntity.ok(customerService.getCustomerById(id));
+    public ResponseEntity<Customer> getCustomerById(Authentication authentication, @PathVariable String id) {
+        return ResponseEntity.ok(customerService.getOwnCustomer(id, authentication.getName()));
     }
 
     // ── POST /api/customers ────────────────────────────────────────────────────
@@ -70,15 +79,16 @@ public class CustomerController {
     // ── PUT /api/customers/:id ─────────────────────────────────────────────────
     @PutMapping("/{id}")
     public ResponseEntity<Customer> updateCustomer(
+            Authentication authentication,
             @PathVariable String id,
             @RequestBody Customer updatedData) {
-        return ResponseEntity.ok(customerService.updateCustomer(id, updatedData));
+        return ResponseEntity.ok(customerService.updateCustomer(id, authentication.getName(), updatedData));
     }
 
     // ── DELETE /api/customers/:id ──────────────────────────────────────────────
     @DeleteMapping("/{id}")
-    public ResponseEntity<Map<String, Object>> deleteCustomer(@PathVariable String id) {
-        customerService.deleteCustomer(id);
+    public ResponseEntity<Map<String, Object>> deleteCustomer(Authentication authentication, @PathVariable String id) {
+        customerService.deleteCustomer(id, authentication.getName());
         return ResponseEntity.ok(Map.of("deleted", true));
     }
 }

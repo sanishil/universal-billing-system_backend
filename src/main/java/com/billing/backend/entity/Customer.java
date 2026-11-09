@@ -24,6 +24,10 @@ public class Customer {
 
     @Column(name = "userid", length = 20, nullable = false)
     private String userid;
+
+    /** The user who added this customer; each user has their own customer list */
+    @Column(name = "owner_id", length = 20)
+    private String ownerId;
     @Column(name = "name", nullable = false, length = 150)
     private String name;
 

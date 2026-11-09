@@ -16,6 +16,18 @@ public interface CustomerRepository extends JpaRepository<Customer, String> {
 
     List<Customer> findByStatus(Customer.CustomerStatus status);
     Optional<Customer> findByEmail(String email);
+
+    /** The user's own customer list, newest first */
+    List<Customer> findByOwnerIdOrderByCreatedAtDesc(String ownerId);
+
+    Optional<Customer> findFirstByOwnerIdAndEmailIgnoreCase(String ownerId, String email);
+
+    boolean existsByOwnerIdAndEmailIgnoreCase(String ownerId, String email);
+
+    boolean existsByOwnerIdAndPhone(String ownerId, String phone);
+
+    /** Customer records other users already have for this email */
+    List<Customer> findByEmailIgnoreCaseOrderByCreatedAtAsc(String email);
     List<Customer> findByUserid(String userid);
     Optional<Customer> findByPhone(String phone);
 
