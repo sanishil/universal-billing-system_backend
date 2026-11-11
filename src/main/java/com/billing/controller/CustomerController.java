@@ -43,8 +43,11 @@ public class CustomerController {
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "10") int size) {
 
-        Customer.CustomerStatus statusEnum = null;
-        if (status != null && !status.isBlank() && !status.equalsIgnoreCase("ALL")) {
+        // Removed (INACTIVE) customers are hidden unless asked for; ?status=ALL shows everyone
+        Customer.CustomerStatus statusEnum = Customer.CustomerStatus.ACTIVE;
+        if (status != null && status.equalsIgnoreCase("ALL")) {
+            statusEnum = null;
+        } else if (status != null && !status.isBlank()) {
             try {
                 statusEnum = Customer.CustomerStatus.valueOf(status.toUpperCase());
             } catch (IllegalArgumentException ignored) {}

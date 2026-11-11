@@ -10,6 +10,8 @@ import com.billing.backend.repository.CustomerRepository;
 import com.billing.backend.repository.UserRepository;
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
@@ -31,6 +33,7 @@ import java.security.SecureRandom;
 import java.util.List;
 
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class CustomerService {
@@ -40,6 +43,10 @@ public class CustomerService {
     private final PasswordEncoder passwordEncoder;
     private final JavaMailSender mailSender;
     private final BusinessService businessService;
+
+    /** Sender for customer emails; empty lets the mail server use the logged-in account */
+    @Value("${spring.mail.username:}")
+    private String mailFrom;
 
     public Customer getCustomerById(String id) {
         return customerRepository.findById(id)
@@ -90,6 +97,13 @@ public class CustomerService {
         }
 
         Optional<Customer> mine = customerRepository.findFirstByOwnerIdAndEmailIgnoreCase(userId, email);
+        if (mine.isPresent() && mine.get().getStatus() == Customer.CustomerStatus.INACTIVE) {
+            // Removed earlier: saving brings the same record back, with its bill history
+            result.put("status", "NEW");
+            result.put("removedCustomerId", mine.get().getId());
+            result.put("name", mine.get().getName());
+            return result;
+        }
         if (mine.isPresent()) {
             result.put("status", "MINE");
             result.put("customerId", mine.get().getId());
@@ -148,6 +162,16 @@ public class CustomerService {
                         .getContext().getAuthentication();
         String ownerId = auth != null ? auth.getName() : null;
 
+        // A customer this user removed earlier is brought back (same id, so their bills stay linked)
+        Optional<Customer> removed = (email.isEmpty()
+                ? Optional.<Customer>empty()
+                : customerRepository.findFirstByOwnerIdAndEmailIgnoreCase(ownerId, email))
+                .or(() -> phone.isEmpty() ? Optional.empty() : customerRepository.findFirstByOwnerIdAndPhone(ownerId, phone))
+                .filter(c -> c.getStatus() == Customer.CustomerStatus.INACTIVE);
+        if (removed.isPresent()) {
+            return restoreCustomer(removed.get(), customerData, name, email, phone, gstin, pan, giveLogin, auth);
+        }
+
         // Duplicates are only checked within your own list; other users may have the same customer
         if (!email.isEmpty() && customerRepository.existsByOwnerIdAndEmailIgnoreCase(ownerId, email)) {
             throw new ConflictException("\"" + email + "\" is already in your customers.");
@@ -163,6 +187,10 @@ public class CustomerService {
                     + "\" already exists. Untick \"Give this customer a login\" to add them as a customer only.");
         }
         boolean createLogin = giveLogin && existingAccount.isEmpty();
+        // Already in the system (own login, or another business's customer): they get told who added them.
+        // Checked before saving, so this new record doesn't count.
+        boolean alreadyInSystem = !email.isEmpty()
+                && (existingAccount.isPresent() || !customerRepository.findByEmailIgnoreCaseOrderByCreatedAtAsc(email).isEmpty());
         String loginUserName = (auth != null && auth.getDetails() != null)
                 ? auth.getDetails().toString()
                 : "Unknown";
@@ -226,8 +254,74 @@ public class CustomerService {
 
         if (createLogin) {
             createCustomerLogin(customer, userId, loginUserName);
+        } else if (alreadyInSystem) {
+            sendAddedToBusinessEmail(customer, loginUserName, existingAccount.isPresent());
         }
         return customer;
+    }
+
+    /** Re-activates a removed customer with the details just entered, keeping its id and bills */
+    private Customer restoreCustomer(Customer existing, Customer form, String name, String email, String phone,
+                                     String gstin, String pan, boolean giveLogin,
+                                     UsernamePasswordAuthenticationToken auth) {
+        Business business = null;
+        if (StringUtils.hasText(form.getBusinessId()) && auth != null) {
+            business = businessService.getOwnedBusiness(form.getBusinessId(), auth.getName());
+        }
+        String stateCode = trimToEmpty(form.getStateCode());
+        if (stateCode.isEmpty() && !gstin.isEmpty()) stateCode = gstin.substring(0, 2);
+        if (stateCode.isEmpty()) stateCode = trimToEmpty(existing.getStateCode());
+        if (stateCode.isEmpty()) {
+            throw new BadRequestException("Please select the customer's state");
+        }
+
+        existing.setName(name);
+        if (!email.isEmpty()) existing.setEmail(email);
+        if (!phone.isEmpty()) existing.setPhone(phone);
+        existing.setAddress(trimToEmpty(form.getAddress()));
+        if (business != null) {
+            existing.setBusinessId(business.getId());
+            existing.setCompany(business.getName());
+        }
+        existing.setGstin(gstin);
+        existing.setPan(pan);
+        existing.setState(trimToEmpty(form.getState()));
+        existing.setStateCode(stateCode);
+        existing.setStatus(Customer.CustomerStatus.ACTIVE);
+        Customer saved = customerRepository.save(existing);
+
+        if (giveLogin && !StringUtils.hasText(saved.getUserid())) {
+            giveLogin(saved.getId());
+        }
+        return saved;
+    }
+
+    /**
+     * Tells a customer who is already in the system that another business has added them.
+     * A mail failure is logged, never thrown: the customer is saved either way.
+     */
+    private void sendAddedToBusinessEmail(Customer customer, String addedBy, boolean hasAccount) {
+        String business = StringUtils.hasText(customer.getCompany()) ? customer.getCompany() : addedBy;
+        SimpleMailMessage message = new SimpleMailMessage();
+        if (StringUtils.hasText(mailFrom)) message.setFrom(mailFrom);
+        message.setTo(customer.getEmail());
+        message.setSubject("Universal Billing System - You were added as a customer of " + business);
+        message.setText(
+                "Hello " + customer.getName() + ",\n\n" +
+                        addedBy + " has added you as a customer of " + business + " in the Universal Billing System.\n\n" +
+                        (hasAccount
+                                ? "Bills from " + business + " will appear in your account under Received bills. "
+                                  + "Log in with your usual email and password to see them.\n\n"
+                                : "You will receive invoices from " + business + " by email.\n\n") +
+                        "If you don't recognise this business, you can ignore this email or contact them directly.\n\n" +
+                        "Regards,\n" +
+                        "Universal Billing System"
+        );
+        try {
+            mailSender.send(message);
+        } catch (Exception e) {
+            log.warn("Could not send 'added as customer' email to {}: {}", customer.getEmail(), e.getMessage());
+        }
     }
 
     /**
@@ -364,7 +458,11 @@ public class CustomerService {
             existing.setEmail(newEmail);
         }
         if (StringUtils.hasText(updatedData.getPhone())) {
-            existing.setPhone(updatedData.getPhone().trim());
+            String phone = normalizePhone(updatedData.getPhone());
+            if (!phone.matches("^[6-9][0-9]{9}$")) {
+                throw new BadRequestException("Phone must be a 10-digit Indian mobile number");
+            }
+            existing.setPhone(phone);
         }
         if (StringUtils.hasText(updatedData.getAddress())) {
             existing.setAddress(updatedData.getAddress().trim());

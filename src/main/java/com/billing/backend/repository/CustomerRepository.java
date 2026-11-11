@@ -26,6 +26,8 @@ public interface CustomerRepository extends JpaRepository<Customer, String> {
 
     boolean existsByOwnerIdAndPhone(String ownerId, String phone);
 
+    Optional<Customer> findFirstByOwnerIdAndPhone(String ownerId, String phone);
+
     /** Customer records other users already have for this email */
     List<Customer> findByEmailIgnoreCaseOrderByCreatedAtAsc(String email);
     List<Customer> findByUserid(String userid);

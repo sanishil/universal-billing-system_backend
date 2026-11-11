@@ -3,8 +3,12 @@ package com.billing.backend.service;
 import com.billing.backend.entity.Bill;
 import com.billing.backend.entity.BillItem;
 import com.lowagie.text.*;
+import com.lowagie.text.pdf.BaseFont;
+import com.lowagie.text.pdf.PdfContentByte;
+import com.lowagie.text.pdf.PdfGState;
 import com.lowagie.text.pdf.PdfPCell;
 import com.lowagie.text.pdf.PdfPTable;
+import com.lowagie.text.pdf.PdfPageEventHelper;
 import com.lowagie.text.pdf.PdfWriter;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -37,7 +41,9 @@ public class InvoicePdfService {
     public byte[] render(Bill bill) {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         Document doc = new Document(PageSize.A4, 36, 36, 36, 36);
-        PdfWriter.getInstance(doc, out);
+        PdfWriter writer = PdfWriter.getInstance(doc, out);
+        // Same PAID / UNPAID / OVERDUE stamp the website shows over the invoice
+        writer.setPageEvent(new StatusWatermark(bill.getStatus()));
         doc.open();
 
         boolean gst = bill.getGstRate() != null;
@@ -188,5 +194,85 @@ public class InvoicePdfService {
 
     private String orDash(String s) {
         return StringUtils.hasText(s) ? s : "-";
+    }
+
+    /**
+     * Draws the status stamp (PAID green, UNPAID amber, OVERDUE red) across every page,
+     * matching .ubs-status-watermark on the website: faint bordered text tilted 30 degrees.
+     */
+    static class StatusWatermark extends PdfPageEventHelper {
+        private static final float ANGLE_DEG = 30f;
+        private static final float TEXT_OPACITY = 0.13f;
+        private static final float BORDER_OPACITY = 0.16f;
+
+        private final String text;
+        private final Color color;
+
+        StatusWatermark(Bill.BillStatus status) {
+            if (status == Bill.BillStatus.PAID) {
+                text = "PAID";
+                color = new Color(5, 150, 105);
+            } else if (status == Bill.BillStatus.OVERDUE) {
+                text = "OVERDUE";
+                color = new Color(220, 38, 38);
+            } else {
+                text = "UNPAID";
+                color = new Color(217, 119, 6);
+            }
+        }
+
+        @Override
+        public void onEndPage(PdfWriter writer, Document document) {
+            BaseFont font;
+            try {
+                font = BaseFont.createFont(BaseFont.HELVETICA_BOLD, BaseFont.WINANSI, BaseFont.NOT_EMBEDDED);
+            } catch (Exception e) {
+                return; // a missing watermark must never stop the invoice from rendering
+            }
+            Rectangle page = document.getPageSize();
+
+            // Size the word so the stamp spans about 60% of the page width, capped like the website
+            float letterSpacingEm = 0.12f;
+            int gaps = Math.max(text.length() - 1, 0);
+            float widthPerPoint = font.getWidthPoint(text, 1f) + letterSpacingEm * gaps;
+            float size = Math.min(110f, page.getWidth() * 0.6f / widthPerPoint);
+            float spacing = size * letterSpacingEm;
+            float textWidth = font.getWidthPoint(text, size) + spacing * gaps;
+            float capHeight = font.getFontDescriptor(BaseFont.CAPHEIGHT, size);
+
+            PdfContentByte cb = writer.getDirectContent();
+            cb.saveState();
+
+            // Rotate around the page centre; everything below is drawn centred on (0, 0)
+            double rad = Math.toRadians(ANGLE_DEG);
+            float cos = (float) Math.cos(rad);
+            float sin = (float) Math.sin(rad);
+            cb.concatCTM(cos, sin, -sin, cos, page.getWidth() / 2f, page.getHeight() / 2f);
+
+            PdfGState state = new PdfGState();
+            state.setFillOpacity(TEXT_OPACITY);
+            state.setStrokeOpacity(BORDER_OPACITY);
+            cb.setGState(state);
+
+            // Rounded border around the word
+            float padX = size * 0.3f;
+            float padY = size * 0.18f;
+            cb.setColorStroke(color);
+            cb.setLineWidth(size * 0.06f);
+            cb.roundRectangle(-textWidth / 2f - padX, -capHeight / 2f - padY,
+                    textWidth + 2 * padX, capHeight + 2 * padY, size * 0.12f);
+            cb.stroke();
+
+            // The word itself
+            cb.beginText();
+            cb.setFontAndSize(font, size);
+            cb.setCharacterSpacing(spacing);
+            cb.setColorFill(color);
+            cb.setTextMatrix(-textWidth / 2f, -capHeight / 2f);
+            cb.showText(text);
+            cb.endText();
+
+            cb.restoreState();
+        }
     }
 }
